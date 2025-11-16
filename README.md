@@ -12,7 +12,7 @@ A Python application for building a dataset of American Sign Language (ASL) sign
 
 ## Requirements
 
-- Python 3.8 or higher
+- Python 3.12 for mediapipe 
 - Webcam/camera connected to your computer
 - Windows, macOS, or Linux
 
