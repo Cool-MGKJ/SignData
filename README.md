@@ -25,39 +25,14 @@ A Python application for building a dataset of American Sign Language (ASL) sign
    cd signTalk
    ```
 
-3. **Create a virtual environment** (recommended):
-   ```bash
-   python -m venv venv
-   ```
-
-4. **Activate the virtual environment**:
-   - On Windows (PowerShell):
-     ```powershell
-     .\venv\Scripts\Activate.ps1
-     ```
-     If you get an execution policy error, run:
-     ```powershell
-     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-     ```
-   - On Windows (Command Prompt):
-     ```cmd
-     venv\Scripts\activate.bat
-     ```
-   - On macOS/Linux:
-     ```bash
-     source venv/bin/activate
-     ```
-
-5. **Install dependencies**:
+3. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
-
-6. **Verify installation** (optional):
+4. **Run the application**:
    ```bash
-   python -c "import cv2; import mediapipe; import numpy; from PIL import Image; print('All dependencies installed successfully!')"
+   python main.py
    ```
-
 ## Usage
 
 1. **Run the application**:
