@@ -24,7 +24,9 @@ class DatasetManager:
         self,
         label: str,
         normalized_points: List[Tuple[float, float, float]],
-        hand: str = "unknown"
+        hand: str = "unknown",
+        hit_grid_vector: Optional[List[int]] = None,
+        hit_points_coordinates: Optional[List[Tuple[float, float, float]]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -33,6 +35,8 @@ class DatasetManager:
             label: The ASL sign label (e.g., "hello", "thank you")
             normalized_points: List of normalized (x, y, z) tuples
             hand: Which hand(s) detected ("left", "right", "both", "unknown")
+            hit_grid_vector: Optional list of 0s and 1s representing which grid points were hit
+            hit_points_coordinates: Optional list of (x, y, z) tuples for hit grid points
         
         Returns:
             The unique sample ID assigned to this sample
@@ -53,6 +57,21 @@ class DatasetManager:
             'num_points': len(normalized_points),
             'timestamp': datetime.now().isoformat()
         }
+        
+        # Add hit grid vector if provided (for backward compatibility)
+        if hit_grid_vector is not None:
+            sample['hit_grid'] = hit_grid_vector
+            sample['num_grid_points'] = len(hit_grid_vector)
+            sample['num_hit_points'] = sum(hit_grid_vector)
+        
+        # Add hit points with coordinates (primary data)
+        if hit_points_coordinates is not None:
+            # Flatten hit points coordinates: [x1, y1, z1, x2, y2, z2, ...]
+            flattened_hit_points = []
+            for point in hit_points_coordinates:
+                flattened_hit_points.extend([point[0], point[1], point[2]])
+            sample['hit_points'] = flattened_hit_points
+            sample['hit_points_count'] = len(hit_points_coordinates)
         
         self.samples.append(sample)
         return sample_id
@@ -98,10 +117,27 @@ class DatasetManager:
         max_points = max(s['num_points'] for s in self.samples)
         num_coords = max_points * 3  # x, y, z for each point
         
+        # Get maximum grid size (if any samples have hit_grid)
+        max_grid_points = 0
+        has_grid_data = False
+        for s in self.samples:
+            if 'hit_grid' in s:
+                has_grid_data = True
+                grid_size = len(s['hit_grid'])
+                if grid_size > max_grid_points:
+                    max_grid_points = grid_size
+        
         # Create header
         header = ['id', 'label', 'hand', 'num_points']
         for i in range(max_points):
             header.extend([f'point_{i}_x', f'point_{i}_y', f'point_{i}_z'])
+        
+        # Add grid columns if any samples have grid data
+        if has_grid_data:
+            header.append('num_grid_points')
+            header.append('num_hit_points')
+            for i in range(max_grid_points):
+                header.append(f'g_{i}')
         
         mode = 'a' if (append and file_exists) else 'w'
         newline = ''  # Required for CSV on Windows
@@ -131,7 +167,32 @@ class DatasetManager:
                         # Pad if needed
                         row.extend([0.0, 0.0, 0.0])
                 
-                # Pad to match header length if necessary
+                # Pad point coordinates to match max_points
+                num_sample_points = len(points) // 3
+                while num_sample_points < max_points:
+                    row.extend([0.0, 0.0, 0.0])
+                    num_sample_points += 1
+                
+                # Add grid data if present
+                if has_grid_data:
+                    if 'hit_grid' in sample:
+                        row.append(sample.get('num_grid_points', len(sample['hit_grid'])))
+                        row.append(sample.get('num_hit_points', sum(sample['hit_grid'])))
+                        # Add grid vector
+                        grid_vec = sample['hit_grid']
+                        row.extend(grid_vec)
+                        # Pad to max_grid_points if needed
+                        while len(grid_vec) < max_grid_points:
+                            row.append(0)
+                    else:
+                        # No grid data for this sample
+                        row.append(0)  # num_grid_points
+                        row.append(0)  # num_hit_points
+                        # Pad grid columns
+                        for _ in range(max_grid_points):
+                            row.append(0)
+                
+                # Pad to match header length if necessary (shouldn't be needed, but safety check)
                 while len(row) < len(header):
                     row.append(0.0)
                 

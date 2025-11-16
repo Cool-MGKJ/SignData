@@ -9,7 +9,7 @@ from tkinter import ttk, messagebox, scrolledtext
 from PIL import Image, ImageTk
 import numpy as np
 import cv2
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 
 
 class ASLDataCollectionUI:
@@ -256,7 +256,8 @@ class ASLDataCollectionUI:
         self,
         normalized_points: list,
         hand_info: str,
-        label: Optional[str] = None
+        label: Optional[str] = None,
+        hit_grid_info: Optional[Tuple[int, int]] = None
     ):
         """
         Display the most recently captured sample.
@@ -265,6 +266,7 @@ class ASLDataCollectionUI:
             normalized_points: List of normalized (x, y, z) tuples
             hand_info: String describing which hand(s) detected
             label: Optional label for the sample
+            hit_grid_info: Optional tuple of (num_hit_points, total_grid_points)
         """
         self.recent_sample_text.config(state=tk.NORMAL)
         self.recent_sample_text.delete(1.0, tk.END)
@@ -273,7 +275,14 @@ class ASLDataCollectionUI:
         output = f"Hand: {hand_info}\n"
         if label:
             output += f"Label: {label}\n"
-        output += f"Number of points: {len(normalized_points)}\n\n"
+        output += f"Number of points: {len(normalized_points)}\n"
+        
+        # Add hit grid information if provided
+        if hit_grid_info is not None:
+            num_hit, total_grid = hit_grid_info
+            output += f"Hit grid points: {num_hit} / {total_grid}\n"
+        
+        output += "\n"
         output += "Normalized 3D Points:\n"
         output += "-" * 50 + "\n"
         output += f"{'Index':<8} {'X':<12} {'Y':<12} {'Z':<12}\n"
