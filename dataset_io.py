@@ -26,7 +26,15 @@ class DatasetManager:
         normalized_points: List[Tuple[float, float, float]],
         hand: str = "unknown",
         hit_grid_vector: Optional[List[int]] = None,
-        hit_points_coordinates: Optional[List[Tuple[float, float, float]]] = None
+        hit_points_coordinates: Optional[List[Tuple[float, float, float]]] = None,
+        hit_grid_midas: Optional[List[int]] = None,
+        depth_mode: str = "off",
+        grid_center_z: float = 0.0,
+        grid_spacing_norm: float = 0.0,
+        hit_points_midas: Optional[List[Tuple[float, float, float]]] = None,
+        hit_grid_3d: Optional[List[int]] = None,
+        voxel_paths: Optional[dict] = None,
+        grid_dims: Optional[List[int]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -72,6 +80,43 @@ class DatasetManager:
                 flattened_hit_points.extend([point[0], point[1], point[2]])
             sample['hit_points'] = flattened_hit_points
             sample['hit_points_count'] = len(hit_points_coordinates)
+        
+        # Add MiDaS-related fields
+        if hit_grid_midas is not None:
+            sample['hit_grid_midas'] = hit_grid_midas
+        else:
+            sample['hit_grid_midas'] = []
+        
+        sample['depth_mode'] = depth_mode
+        sample['grid_center_z'] = grid_center_z
+        sample['grid_spacing_norm'] = grid_spacing_norm
+        
+        if hit_points_midas is not None:
+            # Flatten MiDaS hit points coordinates: [x1, y1, z1, x2, y2, z2, ...]
+            flattened_hit_points_midas = []
+            for point in hit_points_midas:
+                flattened_hit_points_midas.extend([point[0], point[1], point[2]])
+            sample['hit_points_midas'] = flattened_hit_points_midas
+            sample['hit_points_midas_count'] = len(hit_points_midas)
+        else:
+            sample['hit_points_midas'] = []
+            sample['hit_points_midas_count'] = 0
+        
+        # Add MiDaS 3D voxel grid fields
+        if hit_grid_3d is not None:
+            sample['hit_grid_3d'] = hit_grid_3d
+        else:
+            sample['hit_grid_3d'] = []
+        
+        if voxel_paths is not None:
+            sample['voxel_paths'] = voxel_paths
+        else:
+            sample['voxel_paths'] = {}
+        
+        if grid_dims is not None:
+            sample['grid_dims'] = grid_dims
+        else:
+            sample['grid_dims'] = [12, 15, 7]  # Default: breadth, length, depth_layers
         
         self.samples.append(sample)
         return sample_id

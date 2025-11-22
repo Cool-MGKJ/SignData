@@ -32,6 +32,7 @@ class ASLDataCollectionApp:
         # Configuration
         self.num_points_per_hand = 21  # MediaPipe provides 21 landmarks per hand
         self.spacing_ratio = 1.0  # Normalization scaling factor
+        self.depth_mode = "off"  # Current depth mode
         
         # State
         self.is_capturing = False
@@ -39,6 +40,8 @@ class ASLDataCollectionApp:
         self.captured_landmarks = None
         self.captured_hit_grid = None
         self.captured_hit_points = None  # List of (x, y, z) tuples for hit points
+        self.captured_hit_grid_midas = None  # MiDaS hit grid vector
+        self.captured_hit_points_midas = None  # MiDaS hit points coordinates
         
         # Setup callbacks
         self.ui.set_callbacks(
@@ -46,8 +49,14 @@ class ASLDataCollectionApp:
             on_stop_capture=self.stop_capture,
             on_save_sample=self.save_sample,
             on_export_dataset=self.export_dataset,
-            on_clear_session=self.clear_session
+            on_clear_session=self.clear_session,
+            on_depth_mode_change=self.handle_depth_mode_change
         )
+        
+        # Initialize depth mode from UI
+        self.depth_mode = self.ui.get_depth_mode()
+        self.capture.set_depth_mode(self.depth_mode)
+        self.ui.update_midas_status(self.capture.is_midas_active())
         
         # Initialize camera
         if not self.capture.initialize():
@@ -68,6 +77,8 @@ class ASLDataCollectionApp:
         self.capture.start_grid_tracking()
         self.captured_hit_grid = None
         self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
     
     def stop_capture(self):
         """Stop capture and process the current frame."""
@@ -103,6 +114,10 @@ class ASLDataCollectionApp:
         # Also get the binary vector for compatibility
         self.captured_hit_grid = self.capture.get_hit_grid_vector()
         
+        # Get 3D voxel grid data (always available now, regardless of depth mode)
+        self.captured_hit_grid_midas = self.capture.get_hit_grid_vector()  # 3D voxel grid (1260)
+        self.captured_hit_points_midas = self.capture.get_hit_points_coordinates()
+        
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
@@ -122,6 +137,11 @@ class ASLDataCollectionApp:
         # Display in UI (with hit grid info)
         num_hit_points = len(self.captured_hit_points) if self.captured_hit_points else 0
         total_grid_points = self.capture.get_num_grid_points()
+        
+        # Update hit count display (always 3D voxel grid: 1260 voxels)
+        num_hit_midas = sum(self.captured_hit_grid_midas) if self.captured_hit_grid_midas else 0
+        self.ui.update_hit_count(num_hit_midas, 1260)
+        
         self.ui.display_recent_sample(
             normalized_points, 
             hand_info, 
@@ -158,13 +178,41 @@ class ASLDataCollectionApp:
         # Also keep binary vector for backward compatibility
         hit_grid_vector = self.captured_hit_grid if self.captured_hit_grid is not None else []
         
+        # Get MiDaS-specific data (for backward compatibility)
+        hit_grid_midas = self.captured_hit_grid_midas if self.captured_hit_grid_midas is not None else []
+        hit_points_midas = self.captured_hit_points_midas if self.captured_hit_points_midas is not None else []
+        
+        # Get 3D voxel grid data (always available now, regardless of depth mode)
+        grid_center_z = self.capture.get_grid_center_z()
+        grid_spacing_norm = self.capture.get_grid_spacing_norm()
+        hit_grid_3d = self.captured_hit_grid_midas if self.captured_hit_grid_midas is not None else []
+        voxel_paths = self.capture.get_voxel_paths()
+        
+        # Get grid dimensions from tracker
+        grid_dims = [12, 15, 7]  # Default
+        if hasattr(self.capture.face_grid_tracker, 'breadth'):
+            grid_dims = [
+                self.capture.face_grid_tracker.breadth,
+                self.capture.face_grid_tracker.length,
+                self.capture.face_grid_tracker.depth_layers
+            ]
+        
         # Add to dataset (with both hand-shape and hit-grid data)
+        # IMPORTANT: The 'points' field remains unchanged - MediaPipe normalized hand landmarks
         sample_id = self.dataset.add_sample(
             label=label,
-            normalized_points=normalized_points,
+            normalized_points=normalized_points,  # MediaPipe points - UNCHANGED
             hand=hand_info,
             hit_grid_vector=hit_grid_vector,
-            hit_points_coordinates=hit_points
+            hit_points_coordinates=hit_points,
+            hit_grid_midas=hit_grid_midas,
+            depth_mode=self.depth_mode,
+            grid_center_z=grid_center_z,
+            grid_spacing_norm=grid_spacing_norm,
+            hit_points_midas=hit_points_midas,
+            hit_grid_3d=hit_grid_3d,
+            voxel_paths=voxel_paths,
+            grid_dims=grid_dims
         )
         
         # Update UI
@@ -184,6 +232,8 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_hit_grid = None
         self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
         
         return True
     
@@ -236,7 +286,20 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_hit_grid = None
         self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
         self.ui.update_sample_count(0)
+    
+    def handle_depth_mode_change(self, new_mode: str):
+        """
+        Handle depth mode change from UI.
+        
+        Args:
+            new_mode: New depth mode ("off" or "midas")
+        """
+        self.depth_mode = new_mode
+        self.capture.set_depth_mode(new_mode)
+        self.ui.update_midas_status(self.capture.is_midas_active())
     
     def update_video(self):
         """Update the video feed (called repeatedly)."""
@@ -249,8 +312,16 @@ class ASLDataCollectionApp:
                 frame,
                 track_grid_hits=self.is_capturing,  # Track hits only during capture
                 draw_grid=True,  # Always show grid
-                show_hits=self.is_capturing  # Show hit highlights only during capture
+                show_hits=self.is_capturing,  # Show hit highlights only during capture
+                depth_mode=self.depth_mode  # Pass depth mode for visualization
             )
+            
+            # Update MiDaS status and hit count during capture
+            if self.is_capturing:
+                self.ui.update_midas_status(self.capture.is_midas_active())
+                hit_grid_midas = self.capture.get_hit_grid_vector()
+                num_hit = sum(hit_grid_midas) if hit_grid_midas else 0
+                self.ui.update_hit_count(num_hit, 1260)  # 3D voxel grid: 12*15*7 = 1260
             
             # If capturing, store the current frame
             if self.is_capturing:

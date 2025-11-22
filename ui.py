@@ -40,6 +40,7 @@ class ASLDataCollectionUI:
         self.on_export_dataset = None
         self.on_clear_session = None
         self.on_frame_update = None
+        self.on_depth_mode_change = None
         
         self._setup_ui()
     
@@ -70,9 +71,44 @@ class ASLDataCollectionUI:
         )
         self.status_label.grid(row=2, column=0, pady=(0, 10))
         
+        # Depth mode selection frame
+        depth_frame = ttk.LabelFrame(left_frame, text="Depth Mode", padding="10")
+        depth_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.depth_mode_var = tk.StringVar(value="off")
+        depth_mode_label = ttk.Label(depth_frame, text="Mode:")
+        depth_mode_label.grid(row=0, column=0, padx=(0, 5))
+        
+        self.depth_mode_combo = ttk.Combobox(
+            depth_frame,
+            textvariable=self.depth_mode_var,
+            values=("off", "midas"),
+            state="readonly",
+            width=15
+        )
+        self.depth_mode_combo.grid(row=0, column=1, padx=(0, 10))
+        self.depth_mode_combo.bind("<<ComboboxSelected>>", self._handle_depth_mode_change)
+        
+        # MiDaS status indicator
+        self.midas_status_label = ttk.Label(
+            depth_frame,
+            text="MiDaS: Offline",
+            font=("Arial", 9),
+            foreground="gray"
+        )
+        self.midas_status_label.grid(row=0, column=2, padx=(10, 0))
+        
+        # Hit count display
+        self.hit_count_label = ttk.Label(
+            left_frame,
+            text="Hit Count: 0/180",
+            font=("Arial", 9)
+        )
+        self.hit_count_label.grid(row=4, column=0, pady=(0, 10))
+        
         # Control buttons frame
         controls_frame = ttk.Frame(left_frame)
-        controls_frame.grid(row=3, column=0, pady=(0, 10))
+        controls_frame.grid(row=5, column=0, pady=(0, 10))
         
         self.start_button = ttk.Button(
             controls_frame,
@@ -92,7 +128,7 @@ class ASLDataCollectionUI:
         
         # Label input frame
         label_frame = ttk.LabelFrame(left_frame, text="Sign Label", padding="10")
-        label_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        label_frame.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         self.label_entry = ttk.Entry(label_frame, width=30, font=("Arial", 11))
         self.label_entry.grid(row=0, column=0, padx=(0, 5))
@@ -222,6 +258,12 @@ class ASLDataCollectionUI:
             self.recent_sample_text.config(state=tk.DISABLED)
             messagebox.showinfo("Success", "Session cleared.")
     
+    def _handle_depth_mode_change(self, event=None):
+        """Handle depth mode dropdown change."""
+        if self.on_depth_mode_change:
+            new_mode = self.depth_mode_var.get()
+            self.on_depth_mode_change(new_mode)
+    
     def update_camera_frame(self, frame: np.ndarray):
         """
         Update the camera preview with a new frame.
@@ -317,13 +359,40 @@ class ASLDataCollectionUI:
         if "Ready" in current_status or "Sample saved" in current_status:
             self.status_label.config(text=f"Status: {count} samples collected. Ready for next capture.")
     
+    def update_midas_status(self, is_active: bool):
+        """
+        Update the MiDaS status indicator.
+        
+        Args:
+            is_active: True if MiDaS is active, False otherwise
+        """
+        if is_active:
+            self.midas_status_label.config(text="MiDaS: Active", foreground="green")
+        else:
+            self.midas_status_label.config(text="MiDaS: Offline", foreground="gray")
+    
+    def update_hit_count(self, hit_count: int, total: int = 180):
+        """
+        Update the hit count display.
+        
+        Args:
+            hit_count: Number of grid points hit
+            total: Total number of grid points (default: 180)
+        """
+        self.hit_count_label.config(text=f"Hit Count: {hit_count}/{total}")
+    
+    def get_depth_mode(self) -> str:
+        """Get the current depth mode selection."""
+        return self.depth_mode_var.get()
+    
     def set_callbacks(
         self,
         on_start_capture: Callable,
         on_stop_capture: Callable,
         on_save_sample: Callable,
         on_export_dataset: Callable,
-        on_clear_session: Callable
+        on_clear_session: Callable,
+        on_depth_mode_change: Optional[Callable] = None
     ):
         """
         Set callback functions for UI events.
@@ -334,10 +403,12 @@ class ASLDataCollectionUI:
             on_save_sample: Called when Save Sample is clicked (takes label, returns bool)
             on_export_dataset: Called when Export Dataset is clicked
             on_clear_session: Called when Clear Session is confirmed
+            on_depth_mode_change: Called when depth mode is changed (takes mode string)
         """
         self.on_start_capture = on_start_capture
         self.on_stop_capture = on_stop_capture
         self.on_save_sample = on_save_sample
         self.on_export_dataset = on_export_dataset
         self.on_clear_session = on_clear_session
+        self.on_depth_mode_change = on_depth_mode_change
 

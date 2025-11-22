@@ -13,6 +13,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from typing import Optional, List, Tuple
+from face_grid_3d import FaceGrid3D
 
 
 class FaceGridTracker:
@@ -353,14 +354,21 @@ class FaceGridTracker:
 
 
 class HandCapture:
-    """Manages webcam capture and MediaPipe hand detection."""
+    """
+    Manages webcam capture and MediaPipe hand detection.
     
-    def __init__(self, camera_index: int = 0):
+    IMPORTANT: The MediaPipe normalized hand-landmark pipeline and exported 'points' field
+    MUST remain unchanged in format and ordering. All voxel grid computations use separate
+    coordinate conversions and do not modify the original MediaPipe points.
+    """
+    
+    def __init__(self, camera_index: int = 0, depth_mode: str = "off"):
         """
         Initialize the hand capture system.
         
         Args:
             camera_index: Index of the camera to use (default: 0)
+            depth_mode: Depth mode to use ("off" or "midas", default: "off")
         """
         self.camera_index = camera_index
         self.cap = None
@@ -369,8 +377,20 @@ class HandCapture:
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Initialize face grid tracker
-        self.face_grid_tracker = FaceGridTracker()
+        # Depth mode
+        self.depth_mode = depth_mode
+        self.selected_landmark = 8  # Default: index_tip for path visualization
+        
+        # Always use FaceGrid3D for 3D voxel grid (with MiDaS or MediaPipe z fallback)
+        self.face_grid_tracker = FaceGrid3D(
+            breadth=12,
+            length=15,
+            depth_layers=7,
+            track_landmark_paths=True,
+            tracked_landmarks=[8, 4]  # index_tip, thumb_tip
+        )
+        self.face_grid_tracker.set_depth_mode(depth_mode)
+        self.use_midas = (depth_mode == "midas")
         
     def initialize(self) -> bool:
         """
@@ -398,6 +418,15 @@ class HandCapture:
                 model_complexity=1
             )
             
+            # Initialize MiDaS depth if using MiDaS mode
+            if self.use_midas:
+                if not self.face_grid_tracker.initialize_depth():
+                    print("Warning: MiDaS depth initialization failed, falling back to MediaPipe z")
+                    # Fallback to MediaPipe z (still 3D voxels)
+                    self.face_grid_tracker.set_depth_mode("off")
+                    self.use_midas = False
+                    self.depth_mode = "off"
+            
             return True
         except Exception as e:
             print(f"Error initializing capture: {e}")
@@ -424,7 +453,8 @@ class HandCapture:
         frame: np.ndarray, 
         track_grid_hits: bool = False,
         draw_grid: bool = True,
-        show_hits: bool = True
+        show_hits: bool = True,
+        depth_mode: Optional[str] = None
     ) -> Tuple[np.ndarray, List[dict]]:
         """
         Process a frame to detect hand landmarks and optionally track grid hits.
@@ -499,13 +529,21 @@ class HandCapture:
                     self.mp_drawing_styles.get_default_hand_connections_style()
                 )
         
-        # Update hit grid if tracking
+        # Update hit grid if tracking (always use 3D voxel tracking)
         if track_grid_hits and landmarks_list:
-            self.face_grid_tracker.update_hit_grid(landmarks_list)
+            self.face_grid_tracker.update_hit_tracking(landmarks_list)
         
-        # Draw grid on top
+        # Draw grid on top (always 3D voxel grid)
         if draw_grid:
-            annotated_frame = self.face_grid_tracker.draw_grid(annotated_frame, show_hits=show_hits)
+            current_depth_mode = depth_mode if depth_mode is not None else self.depth_mode
+            # Get selected landmark for path visualization (default: index_tip = 8)
+            selected_landmark = getattr(self, 'selected_landmark', 8)
+            annotated_frame = self.face_grid_tracker.draw_grid(
+                annotated_frame, 
+                show_hits=show_hits,
+                depth_mode=current_depth_mode,
+                selected_landmark=selected_landmark
+            )
         
         return annotated_frame, landmarks_list
     
@@ -551,12 +589,12 @@ class HandCapture:
     
     def start_grid_tracking(self):
         """Start a new grid tracking session (call when Start Capture is pressed)."""
-        self.face_grid_tracker.reset_hit_grid()
+        self.face_grid_tracker.reset_hit_tracking()
     
     def stop_grid_tracking(self):
         """Stop grid tracking and reset hits (call when Stop Capture is pressed)."""
         # Reset hit grid after capture stops
-        self.face_grid_tracker.reset_hit_grid()
+        self.face_grid_tracker.reset_hit_tracking()
     
     def get_hit_grid_vector(self) -> List[int]:
         """
@@ -565,7 +603,7 @@ class HandCapture:
         Returns:
             List of 0s and 1s representing which grid points were hit
         """
-        return self.face_grid_tracker.get_hit_grid_vector()
+        return self.face_grid_tracker.get_hit_grid_3d()
     
     def get_hit_points_coordinates(self) -> List[Tuple[float, float, float]]:
         """
@@ -574,11 +612,69 @@ class HandCapture:
         Returns:
             List of (x, y, z) tuples for each grid point that was hit
         """
-        return self.face_grid_tracker.get_hit_points_coordinates()
+        return self.face_grid_tracker.get_voxel_hit_centers()
+    
+    def get_voxel_paths(self) -> dict:
+        """
+        Get ordered voxel paths per landmark.
+        
+        Returns:
+            Dictionary mapping landmark names to ordered lists of voxel indices
+        """
+        if hasattr(self.face_grid_tracker, 'get_voxel_paths'):
+            return self.face_grid_tracker.get_voxel_paths()
+        return {}
     
     def get_num_grid_points(self) -> int:
         """Get the total number of grid points."""
-        return self.face_grid_tracker.num_grid_points
+        return self.face_grid_tracker.num_voxels  # 1260 for 3D voxel grid (12*15*7)
+    
+    def set_depth_mode(self, depth_mode: str):
+        """
+        Set the depth mode (always uses 3D voxel grid with MiDaS or MediaPipe z fallback).
+        
+        Args:
+            depth_mode: "off" (MediaPipe z) or "midas" (MiDaS depth)
+        """
+        if depth_mode == self.depth_mode:
+            return
+        
+        self.depth_mode = depth_mode
+        self.use_midas = (depth_mode == "midas")
+        
+        # Update depth mode in existing tracker (no need to recreate)
+        if self.face_grid_tracker is not None:
+            self.face_grid_tracker.set_depth_mode(depth_mode)
+            
+            # Initialize MiDaS if switching to midas mode
+            if self.use_midas:
+                if not self.face_grid_tracker.initialize_depth():
+                    print("Warning: MiDaS depth initialization failed, falling back to MediaPipe z")
+                    self.face_grid_tracker.set_depth_mode("off")
+                    self.use_midas = False
+                    self.depth_mode = "off"
+    
+    def get_depth_mode(self) -> str:
+        """Get the current depth mode."""
+        return self.depth_mode
+    
+    def get_grid_center_z(self) -> float:
+        """Get the depth at grid center (nose pixel) - MiDaS or MediaPipe z."""
+        if hasattr(self.face_grid_tracker, 'grid_center_z'):
+            return self.face_grid_tracker.grid_center_z
+        return 0.0
+    
+    def get_grid_spacing_norm(self) -> float:
+        """Get the normalized grid spacing."""
+        if hasattr(self.face_grid_tracker, 'grid_spacing_norm'):
+            return self.face_grid_tracker.grid_spacing_norm
+        return 0.0
+    
+    def is_midas_active(self) -> bool:
+        """Check if MiDaS depth is active."""
+        if self.use_midas and hasattr(self.face_grid_tracker, 'depth_provider'):
+            return self.face_grid_tracker.depth_provider.is_active()
+        return False
     
     def release(self):
         """Release camera resources."""
