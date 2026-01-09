@@ -70,6 +70,41 @@ class ASLDataCollectionUI:
         )
         self.status_label.grid(row=2, column=0, pady=(0, 10))
         
+        # Depth mode selection frame
+        depth_frame = ttk.LabelFrame(left_frame, text="Depth Mode", padding="10")
+        depth_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.depth_mode_var = tk.StringVar(value="off")
+        depth_mode_label = ttk.Label(depth_frame, text="Mode:")
+        depth_mode_label.grid(row=0, column=0, padx=(0, 5))
+        
+        self.depth_mode_combo = ttk.Combobox(
+            depth_frame,
+            textvariable=self.depth_mode_var,
+            values=("off", "midas"),
+            state="readonly",
+            width=15
+        )
+        self.depth_mode_combo.grid(row=0, column=1, padx=(0, 10))
+        self.depth_mode_combo.bind("<<ComboboxSelected>>", self._handle_depth_mode_change)
+        
+        # MiDaS status indicator
+        self.midas_status_label = ttk.Label(
+            depth_frame,
+            text="MiDaS: Offline",
+            font=("Arial", 9),
+            foreground="gray"
+        )
+        self.midas_status_label.grid(row=0, column=2, padx=(10, 0))
+        
+        # Hit count display
+        self.hit_count_label = ttk.Label(
+            left_frame,
+            text="Hit Count: 0/160",
+            font=("Arial", 9)
+        )
+        self.hit_count_label.grid(row=4, column=0, pady=(0, 10))
+        
         # Control buttons frame
         controls_frame = ttk.Frame(left_frame)
         controls_frame.grid(row=3, column=0, pady=(0, 10))
