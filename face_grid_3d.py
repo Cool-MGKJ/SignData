@@ -502,14 +502,21 @@ class FaceGrid3D:
         annotated_frame = frame.copy()
         
         # Create list of voxels with their z-depth for sorting (back-to-front)
+        # Apply a small horizontal offset per layer to make layers visually distinguishable
+        layer_offset_pixels = 3  # Pixels to offset each layer horizontally
+        
         voxel_draw_list = []
         for voxel_idx in range(self.num_voxels):
             if voxel_idx < len(self.voxel_centers) and voxel_idx < len(self.voxel_centers_2d):
                 u, v = self.voxel_centers_2d[voxel_idx]
-                if 0 <= u < self.frame_width and 0 <= v < self.frame_height:
-                    _, _, z_norm = self.voxel_centers[voxel_idx]
-                    z_idx = voxel_idx // (self.breadth * self.length)
-                    voxel_draw_list.append((voxel_idx, u, v, z_norm, z_idx))
+                _, _, z_norm = self.voxel_centers[voxel_idx]
+                z_idx = voxel_idx // (self.breadth * self.length)
+                
+                # Apply horizontal offset based on layer (farther layers offset more to the right)
+                u_offset = u + z_idx * layer_offset_pixels
+                
+                if 0 <= u_offset < self.frame_width and 0 <= v < self.frame_height:
+                    voxel_draw_list.append((voxel_idx, u_offset, v, z_norm, z_idx))
         
         # Sort by z-depth (farthest first, so nearer voxels overlay)
         voxel_draw_list.sort(key=lambda x: x[3], reverse=True)

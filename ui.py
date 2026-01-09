@@ -240,6 +240,12 @@ class ASLDataCollectionUI:
             else:
                 messagebox.showerror("Error", "Failed to save sample.")
     
+    def _handle_depth_mode_change(self, event=None):
+        """Handle depth mode combobox selection change."""
+        # Depth mode is now always 'off' (MediaPipe z-only), so this is a no-op
+        # Kept for backward compatibility with the UI
+        pass
+    
     def _handle_export_dataset(self):
         """Handle Export Dataset button click."""
         if self.on_export_dataset:
@@ -342,6 +348,16 @@ class ASLDataCollectionUI:
         current_status = self.status_label.cget("text")
         if "Ready" in current_status or "Sample saved" in current_status:
             self.status_label.config(text=f"Status: {count} samples collected. Ready for next capture.")
+    
+    def update_hit_count(self, num_hit: int, total: int):
+        """
+        Update the hit count display.
+        
+        Args:
+            num_hit: Number of voxels hit
+            total: Total number of voxels
+        """
+        self.hit_count_label.config(text=f"Hit Count: {num_hit}/{total}")
     
     def set_callbacks(
         self,

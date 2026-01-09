@@ -376,7 +376,7 @@ class HandCapture:
         self.face_grid_tracker = FaceGrid3D(
             breadth=8,
             length=10,
-            depth_layers=2,
+            depth_layers=3,  # 3 layers: near, middle, far
             track_landmark_paths=True,
             tracked_landmarks=[8, 4]  # index_tip, thumb_tip
         )
@@ -506,6 +506,10 @@ class HandCapture:
                     self.mp_drawing_styles.get_default_hand_connections_style()
                 )
         
+        # Process face for grid (must be called every frame to update grid position)
+        if draw_grid:
+            self.face_grid_tracker.process_frame(frame)
+        
         # Update hit grid if tracking (always use 3D voxel tracking)
         if track_grid_hits and landmarks_list:
             self.face_grid_tracker.update_hit_tracking(landmarks_list)
@@ -515,10 +519,10 @@ class HandCapture:
             # Get selected landmark for path visualization (default: index_tip = 8)
             selected_landmark = getattr(self, 'selected_landmark', 8)
             annotated_frame = self.face_grid_tracker.draw_grid(
-                annotated_frame, 
+                annotated_frame,
                 show_hits=show_hits,
                 selected_landmark=selected_landmark,
-                show_indices=True
+                show_indices=False
             )
         
         return annotated_frame, landmarks_list
