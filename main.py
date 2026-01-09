@@ -37,6 +37,11 @@ class ASLDataCollectionApp:
         self.is_capturing = False
         self.captured_frame = None
         self.captured_landmarks = None
+        self.captured_hit_grid = None
+        self.captured_hit_points = None  # List of (x, y, z) tuples for hit points
+        self.captured_hit_grid_midas = None  # 3D voxel hit grid vector
+        self.captured_hit_points_midas = None  # 3D voxel hit points coordinates
+        self.captured_hit_order = None
         
         # Setup callbacks
         self.ui.set_callbacks(
@@ -62,6 +67,13 @@ class ASLDataCollectionApp:
     def start_capture(self):
         """Start capture mode."""
         self.is_capturing = True
+        # Reset grid tracking for new capture session
+        self.capture.start_grid_tracking()
+        self.captured_hit_grid = None
+        self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
+        self.captured_hit_order = None
     
     def stop_capture(self):
         """Stop capture and process the current frame."""
@@ -82,7 +94,23 @@ class ASLDataCollectionApp:
         # Store for saving
         self.captured_landmarks = landmarks_list
         
-        # Normalize landmarks
+        # Get the hit points with their 3D coordinates (accumulated during the entire capture session)
+        # Do this BEFORE resetting the grid
+        self.captured_hit_points = self.capture.get_hit_points_coordinates()
+        
+        # Also get the binary vector for compatibility
+        self.captured_hit_grid = self.capture.get_hit_grid_vector()
+        
+        # Get 3D voxel grid data (always available)
+        self.captured_hit_grid_midas = self.capture.get_hit_grid_vector()
+        self.captured_hit_points_midas = self.capture.get_hit_points_coordinates()
+        self.captured_hit_order = self.capture.get_hit_order()
+        
+        # Reset grid tracking (so hits don't show after stop)
+        # This clears the hit_grid so visualization shows no green points
+        self.capture.stop_grid_tracking()
+        
+        # Normalize landmarks (for conventional hand-shape representation)
         hand_info = get_hand_info(landmarks_list)
         normalized_points = normalize_multiple_hands(
             landmarks_list,
@@ -94,8 +122,19 @@ class ASLDataCollectionApp:
             messagebox.showerror("Error", "Failed to normalize landmarks.")
             return
         
-        # Display in UI
-        self.ui.display_recent_sample(normalized_points, hand_info)
+        # Display in UI (with hit grid info)
+        num_hit_points = len(self.captured_hit_points) if self.captured_hit_points else 0
+        total_grid_points = self.capture.get_num_grid_points()
+        
+        # Update hit count display using current grid dimensions
+        num_hit_midas = sum(self.captured_hit_grid_midas) if self.captured_hit_grid_midas else 0
+        self.ui.update_hit_count(num_hit_midas, total_grid_points)
+        
+        self.ui.display_recent_sample(
+            normalized_points, 
+            hand_info, 
+            hit_grid_info=(num_hit_points, total_grid_points)
+        )
     
     def save_sample(self, label: str) -> bool:
         """
@@ -121,11 +160,15 @@ class ASLDataCollectionApp:
         if normalized_points is None:
             return False
         
-        # Add to dataset
+        hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
+        
+        # Add to dataset (with both hand-shape and hit-order data)
+        # IMPORTANT: The 'points' field remains unchanged - MediaPipe normalized hand landmarks
         sample_id = self.dataset.add_sample(
             label=label,
-            normalized_points=normalized_points,
-            hand=hand_info
+            normalized_points=normalized_points,  # MediaPipe points - UNCHANGED
+            hand=hand_info,
+            hit_order=hit_order
         )
         
         # Update UI
@@ -143,6 +186,11 @@ class ASLDataCollectionApp:
         # Reset captured data
         self.captured_landmarks = None
         self.captured_frame = None
+        self.captured_hit_grid = None
+        self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
+        self.captured_hit_order = None
         
         return True
     
@@ -193,6 +241,11 @@ class ASLDataCollectionApp:
         self.dataset.clear()
         self.captured_landmarks = None
         self.captured_frame = None
+        self.captured_hit_grid = None
+        self.captured_hit_points = None
+        self.captured_hit_grid_midas = None
+        self.captured_hit_points_midas = None
+        self.captured_hit_order = None
         self.ui.update_sample_count(0)
     
     def update_video(self):
@@ -200,8 +253,21 @@ class ASLDataCollectionApp:
         frame = self.capture.read_frame()
         
         if frame is not None:
-            # Process frame for display (with landmarks drawn)
-            annotated_frame, landmarks_list = self.capture.process_frame(frame)
+            # Process frame for display (with landmarks drawn and grid tracking)
+            # Track grid hits and show hits only during capture, always draw grid
+            annotated_frame, landmarks_list = self.capture.process_frame(
+                frame,
+                track_grid_hits=self.is_capturing,  # Track hits only during capture
+                draw_grid=True,  # Always show grid
+                show_hits=self.is_capturing  # Show hit highlights only during capture
+            )
+            
+            # Update hit count during capture
+            if self.is_capturing:
+                hit_grid = self.capture.get_hit_grid_vector()
+                num_hit = sum(hit_grid) if hit_grid else 0
+                total_grid_points = self.capture.get_num_grid_points()
+                self.ui.update_hit_count(num_hit, total_grid_points)
             
             # If capturing, store the current frame
             if self.is_capturing:

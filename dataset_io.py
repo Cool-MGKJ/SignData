@@ -24,7 +24,8 @@ class DatasetManager:
         self,
         label: str,
         normalized_points: List[Tuple[float, float, float]],
-        hand: str = "unknown"
+        hand: str = "unknown",
+        hit_order: Optional[List[int]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -33,6 +34,7 @@ class DatasetManager:
             label: The ASL sign label (e.g., "hello", "thank you")
             normalized_points: List of normalized (x, y, z) tuples
             hand: Which hand(s) detected ("left", "right", "both", "unknown")
+            hit_order: Ordered list of voxel indices representing hit sequence
         
         Returns:
             The unique sample ID assigned to this sample
@@ -53,6 +55,8 @@ class DatasetManager:
             'num_points': len(normalized_points),
             'timestamp': datetime.now().isoformat()
         }
+        
+        sample['hit_order'] = hit_order if hit_order is not None else []
         
         self.samples.append(sample)
         return sample_id
@@ -98,10 +102,21 @@ class DatasetManager:
         max_points = max(s['num_points'] for s in self.samples)
         num_coords = max_points * 3  # x, y, z for each point
         
+        # Determine maximum hit-order length to size columns
+        max_hit_order_len = 0
+        for s in self.samples:
+            if 'hit_order' in s:
+                max_hit_order_len = max(max_hit_order_len, len(s['hit_order']))
+        
         # Create header
         header = ['id', 'label', 'hand', 'num_points']
         for i in range(max_points):
             header.extend([f'point_{i}_x', f'point_{i}_y', f'point_{i}_z'])
+        
+        if max_hit_order_len > 0:
+            header.append('hit_order_length')
+            for i in range(max_hit_order_len):
+                header.append(f'hit_order_{i}')
         
         mode = 'a' if (append and file_exists) else 'w'
         newline = ''  # Required for CSV on Windows
@@ -131,7 +146,21 @@ class DatasetManager:
                         # Pad if needed
                         row.extend([0.0, 0.0, 0.0])
                 
-                # Pad to match header length if necessary
+                # Pad point coordinates to match max_points
+                num_sample_points = len(points) // 3
+                while num_sample_points < max_points:
+                    row.extend([0.0, 0.0, 0.0])
+                    num_sample_points += 1
+                
+                if max_hit_order_len > 0:
+                    order = sample.get('hit_order', [])
+                    row.append(len(order))
+                    for value in order:
+                        row.append(value)
+                    while len(order) < max_hit_order_len:
+                        row.append(-1)
+                
+                # Pad to match header length if necessary (shouldn't be needed, but safety check)
                 while len(row) < len(header):
                     row.append(0.0)
                 
