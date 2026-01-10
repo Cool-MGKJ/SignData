@@ -58,7 +58,7 @@ class FaceGrid3D:
         length: int = 10,   # y-axis (height)
         depth_layers: int = 3,  # z-axis (depth, 3 layers: near, middle, far)
         depth_span_factor: float = 2.4,  # How many spacing steps span forward/back
-        hit_radius_norm: float = 0.06,  # Hit detection radius in normalized 3D space
+        hit_radius_norm: float = 0.12,  # Hit detection radius in normalized 3D space (increased for better triggering)
         track_landmark_paths: bool = True,
         tracked_landmarks: Optional[List[int]] = None
     ):
@@ -114,6 +114,10 @@ class FaceGrid3D:
         self.max_grid_pitch_deg = 30.0  # Clamp pitch rotation
         self.head_yaw_deg = 0.0
         self.head_pitch_deg = 0.0
+        
+        # Store current trigger point for visualization
+        self.current_trigger_point_2d = None  # (u, v) pixel coordinates
+        self.current_trigger_point_3d = None  # (x, y, z) normalized coordinates
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -121,6 +125,8 @@ class FaceGrid3D:
         self.voxel_paths = {landmark_idx: [] for landmark_idx in self.tracked_landmarks}
         self.voxel_last_index_per_landmark = {landmark_idx: -1 for landmark_idx in self.tracked_landmarks}
         self.voxel_hit_order = []
+        self.current_trigger_point_2d = None
+        self.current_trigger_point_3d = None
     
     def voxel_index(self, x_idx: int, y_idx: int, z_idx: int) -> int:
         """
@@ -348,8 +354,10 @@ class FaceGrid3D:
         # Calculate pitch angle: arctan2(dz, dy) gives angle from vertical
         # When nodding down: dy > 0 (chin down), dz > 0 (chin forward)
         # arctan2(dz, dy) gives positive angle when both are positive (nodding down)
-        # This is the correct pitch angle - don't invert
         pitch_rad = np.arctan2(vertical_vector_3d[2], vertical_vector_3d[1] + 1e-6)
+        # Invert the pitch to fix far layer moving opposite - when nodding down, 
+        # we want both layers to move down together
+        pitch_rad = -pitch_rad
         pitch_rad = np.clip(
             pitch_rad,
             np.radians(-self.max_grid_pitch_deg),
@@ -386,13 +394,13 @@ class FaceGrid3D:
                     rotated_z_after_yaw = -offset_x * sin_yaw + offset_z * cos_yaw
                     
                     # Rotate around horizontal axis (pitch) after yaw rotation
-                    # When nodding down (positive pitch), both layers should tilt down together
-                    # The key is to ensure both near and far layers rotate around the same pivot (nose)
-                    # Try inverting the rotation matrix to fix far layer moving opposite
-                    # Standard rotation: y' = y*cos - z*sin, z' = y*sin + z*cos
-                    # For MediaPipe (y down, z forward), when nodding down we want z forward to move down
-                    # So we use: y' = y*cos + z*sin, z' = -y*sin + z*cos
-                    # But if far layer moves opposite, try: y' = y*cos - z*sin, z' = y*sin + z*cos
+                    # When nodding down, both layers should tilt down together around the nose
+                    # We've inverted pitch_rad above, so when nodding down, pitch_rad is negative
+                    # Standard rotation matrix around x-axis (applied with inverted pitch):
+                    #   [1    0        0    ]
+                    #   [0  cos(p) -sin(p) ]
+                    #   [0  sin(p)  cos(p) ]
+                    # With negative pitch (nodding down): sin(p) < 0, so far layer moves down correctly
                     rotated_y = offset_y * cos_pitch - rotated_z_after_yaw * sin_pitch
                     rotated_z_pitch = offset_y * sin_pitch + rotated_z_after_yaw * cos_pitch
                     
@@ -419,13 +427,104 @@ class FaceGrid3D:
         
         return True
     
+    def calculate_palm_trigger_point(self, landmarks: List[Tuple[float, float, float]]) -> Optional[Tuple[float, float, float]]:
+        """
+        Calculate a single palm trigger point based on finger positions and spread/openness.
+        
+        The trigger point moves based on finger spread:
+        - When fingers are closed/fisted: point is near palm center (wrist + MCP joints)
+        - When fingers are spread: point moves towards fingertip average
+        - The movement is proportional to finger spread
+        
+        Args:
+            landmarks: List of 21 (x, y, z) tuples from MediaPipe hand landmarks
+            
+        Returns:
+            (x, y, z) tuple of the trigger point in normalized coordinates, or None if invalid
+        """
+        if len(landmarks) < 21:
+            return None
+        
+        # MediaPipe hand landmark indices
+        WRIST = 0
+        THUMB_TIP = 4
+        INDEX_TIP = 8
+        MIDDLE_TIP = 12
+        RING_TIP = 16
+        PINKY_TIP = 20
+        INDEX_MCP = 5
+        MIDDLE_MCP = 9
+        RING_MCP = 13
+        PINKY_MCP = 17
+        
+        # Calculate palm base center (wrist + MCP joints)
+        wrist = landmarks[WRIST]
+        index_mcp = landmarks[INDEX_MCP]
+        middle_mcp = landmarks[MIDDLE_MCP]
+        ring_mcp = landmarks[RING_MCP]
+        pinky_mcp = landmarks[PINKY_MCP]
+        
+        palm_base = (
+            (wrist[0] + index_mcp[0] + middle_mcp[0] + ring_mcp[0] + pinky_mcp[0]) / 5.0,
+            (wrist[1] + index_mcp[1] + middle_mcp[1] + ring_mcp[1] + pinky_mcp[1]) / 5.0,
+            (wrist[2] + index_mcp[2] + middle_mcp[2] + ring_mcp[2] + pinky_mcp[2]) / 5.0
+        )
+        
+        # Calculate fingertip average (excluding thumb for spread calculation)
+        index_tip = landmarks[INDEX_TIP]
+        middle_tip = landmarks[MIDDLE_TIP]
+        ring_tip = landmarks[RING_TIP]
+        pinky_tip = landmarks[PINKY_TIP]
+        
+        fingertips_avg = (
+            (index_tip[0] + middle_tip[0] + ring_tip[0] + pinky_tip[0]) / 4.0,
+            (index_tip[1] + middle_tip[1] + ring_tip[1] + pinky_tip[1]) / 4.0,
+            (index_tip[2] + middle_tip[2] + ring_tip[2] + pinky_tip[2]) / 4.0
+        )
+        
+        # Calculate finger spread metric
+        # Measure distances from each fingertip to the palm base
+        spread_distances = []
+        for tip in [index_tip, middle_tip, ring_tip, pinky_tip]:
+            dist = np.sqrt(
+                (tip[0] - palm_base[0]) ** 2 +
+                (tip[1] - palm_base[1]) ** 2 +
+                (tip[2] - palm_base[2]) ** 2
+            )
+            spread_distances.append(dist)
+        
+        # Average spread distance
+        avg_spread = np.mean(spread_distances)
+        
+        # Normalize spread (typical range: 0.05 to 0.25 in normalized space)
+        # When fingers are closed: spread ~ 0.05-0.08
+        # When fingers are fully spread: spread ~ 0.15-0.25
+        min_spread = 0.05
+        max_spread = 0.25
+        normalized_spread = np.clip((avg_spread - min_spread) / (max_spread - min_spread), 0.0, 1.0)
+        
+        # Interpolate between palm base and fingertip average based on spread
+        # When spread = 0 (closed): use palm_base (weight = 1.0)
+        # When spread = 1 (open): use fingertips_avg (weight = 1.0)
+        # The trigger point moves more towards fingertips when fingers are spread open
+        # Use a smooth curve to make it more responsive - square the normalized spread for smoother transition
+        spread_curve = normalized_spread ** 0.7  # Slight curve for smoother transition
+        spread_factor = spread_curve * 0.95  # Move up to 95% towards fingertips when fully spread
+        
+        trigger_point = (
+            palm_base[0] * (1.0 - spread_factor) + fingertips_avg[0] * spread_factor,
+            palm_base[1] * (1.0 - spread_factor) + fingertips_avg[1] * spread_factor,
+            palm_base[2] * (1.0 - spread_factor) + fingertips_avg[2] * spread_factor
+        )
+        
+        return trigger_point
+    
     def update_hit_tracking(self, hand_landmarks_list: List[dict], frame_index: Optional[int] = None):
         """
-        Update voxel hit tracking and paths based on hand landmarks.
+        Update voxel hit tracking based on a single palm trigger point per hand.
         
-        For each hand landmark, find the nearest voxel center in true 3D space and mark it as hit
-        if within the hit radius. The hit detection is purely distance-based in 3D - the voxel
-        closest to the hand landmark (considering x, y, and z) will be hit if within range.
+        The trigger point is calculated based on finger positions and spread/openness.
+        Only this single point triggers grid voxels, not individual landmarks.
         
         Args:
             hand_landmarks_list: List of dicts with 'landmarks' key containing
@@ -438,78 +537,70 @@ class FaceGrid3D:
         if self.voxel_centers is None:
             return
         
-        # Process all hand landmarks
+        # Process each hand - use only the single trigger point
         for hand_data in hand_landmarks_list:
             landmarks = hand_data.get('landmarks', [])
             
-            for landmark_idx, landmark in enumerate(landmarks):
-                lx_norm, ly_norm, lz_mp = landmark  # MediaPipe z (relative depth)
+            if len(landmarks) < 21:
+                continue
+            
+            # Calculate single palm trigger point based on finger spread
+            trigger_point = self.calculate_palm_trigger_point(landmarks)
+            
+            if trigger_point is None:
+                self.current_trigger_point_2d = None
+                self.current_trigger_point_3d = None
+                continue
+            
+            lx_norm, ly_norm, lz_mp = trigger_point
+            
+            # Store trigger point for visualization
+            self.current_trigger_point_3d = trigger_point
+            if self.frame_width and self.frame_height:
+                pixel_u = int(lx_norm * self.frame_width)
+                pixel_v = int(ly_norm * self.frame_height)
+                self.current_trigger_point_2d = (pixel_u, pixel_v)
+            else:
+                self.current_trigger_point_2d = None
+            
+            # Get depth for trigger point using MediaPipe z (normalized 0-1)
+            lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
+            if lz_depth < 0.01:
+                lz_depth = 0.5
+            
+            # Find nearest voxel across ALL layers based on true 3D distance
+            # This ensures we select the correct layer based on actual depth
+            min_dist_3d = float('inf')
+            nearest_voxel_idx = -1
+            
+            voxels_per_layer = self.breadth * self.length
+            
+            # Check all voxels in all layers to find the closest one in 3D space
+            for voxel_idx in range(len(self.voxel_centers)):
+                vx, vy, vz = self.voxel_centers[voxel_idx]
                 
-                # Get depth for this landmark using MediaPipe z (normalized 0-1)
-                # Map typical MediaPipe z range (-0.5 to 0.5) to 0-1.
-                # Smaller z_mp values mean closer to camera (more negative = closer)
-                # Larger z_mp values mean farther from camera (more positive = farther)
-                lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
-                if lz_depth < 0.01:
-                    lz_depth = 0.5
+                # Calculate true 3D Euclidean distance
+                dist_3d = np.sqrt(
+                    (lx_norm - vx) ** 2 +
+                    (ly_norm - vy) ** 2 +
+                    (lz_depth - vz) ** 2
+                )
                 
-                # Determine which depth layer to check based on hand depth
-                # Closer hands (smaller lz_depth) should hit near layer (z_idx=0)
-                # Farther hands (larger lz_depth) should hit far layer (z_idx=1)
-                # Get nose depth for reference
-                nose_depth = self.voxel_centers[0][2] if self.voxel_centers else 0.5
-                
-                # Calculate depth difference from nose
-                depth_diff = lz_depth - nose_depth
-                
-                # Determine target layer: closer = layer 0, farther = layer 1
-                if depth_diff < -0.1:  # Hand is closer than nose
-                    target_z_idx = 0  # Near layer
-                elif depth_diff > 0.1:  # Hand is farther than nose
-                    target_z_idx = min(1, self.depth_layers - 1)  # Far layer
-                else:  # Hand is at similar depth to nose
-                    target_z_idx = 0  # Default to near layer
-                
-                # Find nearest voxel in the target depth layer
-                min_dist = float('inf')
-                nearest_voxel_idx = -1
-                
-                # Calculate which voxels belong to the target layer
-                voxels_per_layer = self.breadth * self.length
-                layer_start_idx = target_z_idx * voxels_per_layer
-                layer_end_idx = (target_z_idx + 1) * voxels_per_layer
-                
-                # Only check voxels in the target depth layer
-                for voxel_idx in range(layer_start_idx, min(layer_end_idx, len(self.voxel_centers))):
-                    vx, vy, vz = self.voxel_centers[voxel_idx]
-                    
-                    # Calculate 2D distance (x, y) - depth is already matched by layer selection
-                    dist_2d = np.sqrt(
-                        (lx_norm - vx) ** 2 +
-                        (ly_norm - vy) ** 2
-                    )
-                    
-                    # Add small depth penalty to prefer exact depth match
-                    depth_penalty = abs(lz_depth - vz) * 0.1
-                    dist = dist_2d + depth_penalty
-                    
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest_voxel_idx = voxel_idx
-                
-                # Hit the nearest voxel if within the hit radius
-                # Use 2D hit radius since we're matching by depth layer
-                if nearest_voxel_idx >= 0 and min_dist <= self.hit_radius_norm:
+                if dist_3d < min_dist_3d:
+                    min_dist_3d = dist_3d
+                    nearest_voxel_idx = voxel_idx
+            
+            # Hit the nearest voxel if within the hit radius (in 3D space)
+            # Use a larger radius for 3D distance to make triggering easier
+            hit_radius_3d = self.hit_radius_norm * 2.0  # Increased scale for 3D distance (was 1.5)
+            
+            if nearest_voxel_idx >= 0 and min_dist_3d <= hit_radius_3d:
+                # Only append if this is a different voxel than the last one
+                # This prevents duplicate consecutive entries in the hit order
+                if len(self.voxel_hit_order) == 0 or self.voxel_hit_order[-1] != nearest_voxel_idx:
                     if not self.voxel_hit_bool[nearest_voxel_idx]:
                         self.voxel_hit_bool[nearest_voxel_idx] = True
                     self.voxel_hit_order.append(nearest_voxel_idx)
-                    
-                    # Update path tracking for tracked landmarks
-                    if self.track_landmark_paths and landmark_idx in self.tracked_landmarks:
-                        last_idx = self.voxel_last_index_per_landmark.get(landmark_idx, -1)
-                        if nearest_voxel_idx != last_idx:
-                            self.voxel_paths[landmark_idx].append(nearest_voxel_idx)
-                            self.voxel_last_index_per_landmark[landmark_idx] = nearest_voxel_idx
     
     def draw_grid(
         self,
@@ -617,21 +708,46 @@ class FaceGrid3D:
                     cv2.LINE_AA
                 )
         
-        # Draw path for selected landmark
-        if selected_landmark is not None and self.voxel_paths is not None:
-            path = self.voxel_paths.get(selected_landmark, [])
-            if len(path) > 1:
-                # Draw polyline connecting voxel centers
-                path_points = []
-                for voxel_idx in path:
-                    if voxel_idx < len(self.voxel_centers_2d):
-                        u, v = self.voxel_centers_2d[voxel_idx]
-                        if 0 <= u < self.frame_width and 0 <= v < self.frame_height:
-                            path_points.append((u, v))
-                
-                if len(path_points) > 1:
-                    pts = np.array(path_points, np.int32)
-                    cv2.polylines(annotated_frame, [pts], False, (255, 0, 255), 2)
+        # Draw path line showing the order of hits (from voxel_hit_order)
+        # This draws a line connecting all hit voxels in the order they were hit
+        if self.voxel_hit_order and len(self.voxel_hit_order) > 1:
+            path_points = []
+            for voxel_idx in self.voxel_hit_order:
+                if voxel_idx < len(self.voxel_centers_2d):
+                    u, v = self.voxel_centers_2d[voxel_idx]
+                    # Apply layer offset for consistency
+                    z_idx = voxel_idx // (self.breadth * self.length)
+                    layer_offset_pixels = 3
+                    u_offset = u + z_idx * layer_offset_pixels
+                    if 0 <= u_offset < self.frame_width and 0 <= v < self.frame_height:
+                        path_points.append((u_offset, v))
+            
+            if len(path_points) > 1:
+                pts = np.array(path_points, np.int32)
+                # Draw a bright magenta line to show the path
+                cv2.polylines(annotated_frame, [pts], False, (255, 0, 255), 3)
+                # Also draw small circles at each point in the path for visibility
+                for pt in path_points:
+                    cv2.circle(annotated_frame, pt, 3, (255, 0, 255), -1)
+        
+        # Draw trigger point (palm center based on finger spread)
+        if self.current_trigger_point_2d is not None:
+            u, v = self.current_trigger_point_2d
+            if 0 <= u < self.frame_width and 0 <= v < self.frame_height:
+                # Draw a large, bright red circle to indicate the trigger point
+                cv2.circle(annotated_frame, (u, v), 8, (0, 0, 255), -1)  # Red filled circle
+                cv2.circle(annotated_frame, (u, v), 10, (255, 255, 255), 2)  # White outline
+                # Label it
+                cv2.putText(
+                    annotated_frame,
+                    "TRIGGER",
+                    (u + 12, v - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA
+                )
         
         # Draw status text
         hit_count = np.sum(self.voxel_hit_bool) if self.voxel_hit_bool is not None else 0

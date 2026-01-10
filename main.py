@@ -38,6 +38,7 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_landmarks = None
         self.captured_hit_order = None
+        self.last_known_landmarks = None  # Track last known hand posture during capture
         
         # Setup callbacks
         self.ui.set_callbacks(
@@ -66,6 +67,7 @@ class ASLDataCollectionApp:
         # Reset grid tracking for new capture session
         self.capture.start_grid_tracking()
         self.captured_hit_order = None
+        self.last_known_landmarks = None  # Reset last known landmarks at start of capture
     
     def stop_capture(self):
         """Stop capture and process the current frame."""
@@ -76,15 +78,18 @@ class ASLDataCollectionApp:
         # Extract landmarks from the captured frame
         landmarks_list = self.capture.get_landmarks(self.captured_frame)
         
-        if not landmarks_list:
-            messagebox.showwarning(
-                "Warning",
-                "No hands detected in the captured frame. Please ensure your hands are visible."
-            )
-            return
-        
-        # Store for saving
-        self.captured_landmarks = landmarks_list
+        # Use current frame landmarks if available, otherwise use last known landmarks
+        # This preserves the hand posture even if hand moved out of frame
+        if landmarks_list and len(landmarks_list) > 0:
+            # Current frame has hands detected - use these
+            self.captured_landmarks = landmarks_list
+        elif self.last_known_landmarks and len(self.last_known_landmarks) > 0:
+            # No hands in current frame, but we have last known posture - use that
+            print("No hands detected in current frame, using last known hand posture")
+            self.captured_landmarks = self.last_known_landmarks
+        else:
+            # No hands detected at all during capture session
+            self.captured_landmarks = []
         
         # Get the hit order (accumulated during the entire capture session)
         # Do this BEFORE resetting the grid
@@ -95,16 +100,20 @@ class ASLDataCollectionApp:
         self.capture.stop_grid_tracking()
         
         # Normalize landmarks (for conventional hand-shape representation)
-        hand_info = get_hand_info(landmarks_list)
-        normalized_points = normalize_multiple_hands(
-            landmarks_list,
-            self.num_points_per_hand,
-            self.spacing_ratio
-        )
-        
-        if normalized_points is None:
-            messagebox.showerror("Error", "Failed to normalize landmarks.")
-            return
+        # Handle case where no hands were detected (use captured_landmarks which may be last known)
+        if self.captured_landmarks:
+            hand_info = get_hand_info(self.captured_landmarks)
+            normalized_points = normalize_multiple_hands(
+                self.captured_landmarks,
+                self.num_points_per_hand,
+                self.spacing_ratio
+            )
+            if normalized_points is None:
+                normalized_points = []
+                hand_info = "none"
+        else:
+            normalized_points = []
+            hand_info = "none"
         
         # Display in UI
         total_grid_points = self.capture.get_num_grid_points()
@@ -133,19 +142,22 @@ class ASLDataCollectionApp:
         Returns:
             True if successful, False otherwise
         """
-        if self.captured_landmarks is None:
-            return False
-        
-        # Normalize landmarks
-        hand_info = get_hand_info(self.captured_landmarks)
-        normalized_points = normalize_multiple_hands(
-            self.captured_landmarks,
-            self.num_points_per_hand,
-            self.spacing_ratio
-        )
-        
-        if normalized_points is None:
-            return False
+        # Allow saving even if no landmarks were captured
+        if self.captured_landmarks is None or len(self.captured_landmarks) == 0:
+            # Save with empty points and hit order
+            normalized_points = []
+            hand_info = "none"
+        else:
+            # Normalize landmarks
+            hand_info = get_hand_info(self.captured_landmarks)
+            normalized_points = normalize_multiple_hands(
+                self.captured_landmarks,
+                self.num_points_per_hand,
+                self.spacing_ratio
+            )
+            if normalized_points is None:
+                normalized_points = []
+                hand_info = "none"
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
 
@@ -227,6 +239,7 @@ class ASLDataCollectionApp:
         self.captured_landmarks = None
         self.captured_frame = None
         self.captured_hit_order = None
+        self.last_known_landmarks = None
         self.ui.update_sample_count(0)
     
     def update_video(self):
@@ -250,9 +263,12 @@ class ASLDataCollectionApp:
                 total_grid_points = self.capture.get_num_grid_points()
                 self.ui.update_hit_count(num_hit, total_grid_points)
             
-            # If capturing, store the current frame
+            # If capturing, store the current frame and update last known landmarks
             if self.is_capturing:
                 self.captured_frame = frame.copy()
+                # Update last known landmarks if hands are detected in this frame
+                if landmarks_list and len(landmarks_list) > 0:
+                    self.last_known_landmarks = landmarks_list
             
             # Update UI
             self.ui.update_camera_frame(annotated_frame)
