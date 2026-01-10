@@ -29,20 +29,30 @@ class DatasetManager:
     ) -> int:
         """
         Add a new sample to the dataset.
-        
+
         Args:
             label: The ASL sign label (e.g., "hello", "thank you")
             normalized_points: List of normalized (x, y, z) tuples
             hand: Which hand(s) detected ("left", "right", "both", "unknown")
             hit_order: Ordered list of voxel indices representing hit sequence
-        
+
         Returns:
             The unique sample ID assigned to this sample
         """
         sample_id = self.next_id
         self.next_id += 1
         
-        # Flatten the 3D points into a single list: [x1, y1, z1, x2, y2, z2, ...]
+        # Store points as numbered objects: [{"index": 0, "x": ..., "y": ..., "z": ...}, ...]
+        numbered_points = []
+        for idx, point in enumerate(normalized_points):
+            numbered_points.append({
+                'index': idx,
+                'x': point[0],
+                'y': point[1],
+                'z': point[2]
+            })
+        
+        # Also keep flattened format for backward compatibility
         flattened_points = []
         for point in normalized_points:
             flattened_points.extend([point[0], point[1], point[2]])
@@ -51,14 +61,15 @@ class DatasetManager:
             'id': sample_id,
             'label': label,
             'hand': hand,
-            'points': flattened_points,
+            'points': numbered_points,  # New numbered format
+            'points_flat': flattened_points,  # Keep for backward compatibility
             'num_points': len(normalized_points),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'hit_order': hit_order if hit_order is not None else []
         }
-        
-        sample['hit_order'] = hit_order if hit_order is not None else []
-        
+
         self.samples.append(sample)
+        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}")
         return sample_id
     
     def get_all_samples(self) -> List[dict]:
@@ -137,20 +148,30 @@ class DatasetManager:
                     sample['num_points']
                 ]
                 
-                # Add all point coordinates
-                points = sample['points']
-                for i in range(0, len(points), 3):
-                    if i + 2 < len(points):
-                        row.extend([points[i], points[i+1], points[i+2]])
-                    else:
-                        # Pad if needed
+                # Handle both numbered format (new) and flattened format (old)
+                points = sample.get('points', [])
+                if points and isinstance(points[0], dict):
+                    # New numbered format: [{"index": 0, "x": ..., "y": ..., "z": ...}, ...]
+                    for i in range(max_points):
+                        if i < len(points):
+                            row.extend([points[i]['x'], points[i]['y'], points[i]['z']])
+                        else:
+                            row.extend([0.0, 0.0, 0.0])
+                else:
+                    # Old flattened format: [x1, y1, z1, x2, y2, z2, ...]
+                    # Or use points_flat if available
+                    flat_points = sample.get('points_flat', points)
+                    for i in range(0, len(flat_points), 3):
+                        if i + 2 < len(flat_points):
+                            row.extend([flat_points[i], flat_points[i+1], flat_points[i+2]])
+                        else:
+                            row.extend([0.0, 0.0, 0.0])
+                    
+                    # Pad point coordinates to match max_points
+                    num_sample_points = len(flat_points) // 3
+                    while num_sample_points < max_points:
                         row.extend([0.0, 0.0, 0.0])
-                
-                # Pad point coordinates to match max_points
-                num_sample_points = len(points) // 3
-                while num_sample_points < max_points:
-                    row.extend([0.0, 0.0, 0.0])
-                    num_sample_points += 1
+                        num_sample_points += 1
                 
                 if max_hit_order_len > 0:
                     order = sample.get('hit_order', [])
@@ -174,6 +195,11 @@ class DatasetManager:
         
         The JSON format will be:
         {
+            "metadata": {
+                "total_samples": 10,
+                "exported_at": "2024-01-10T10:30:00",
+                "format_version": "1.0"
+            },
             "samples": [
                 {
                     "id": 1,
@@ -181,6 +207,7 @@ class DatasetManager:
                     "hand": "right",
                     "num_points": 21,
                     "points": [x1, y1, z1, x2, y2, z2, ...],
+                    "hit_order": [0, 5, 12, ...],
                     "timestamp": "..."
                 },
                 ...
@@ -189,21 +216,33 @@ class DatasetManager:
         
         Args:
             path: File path to save to
-            append: If True, append to existing file (default: False)
+            append: If True, append only the latest sample to existing file (default: False)
         """
         if not self.samples:
             print("No samples to save.")
             return
         
-        # If appending and file exists, load existing data
+        # If appending, only append new samples (avoid duplicates)
+        existing_samples = []
         if append and os.path.exists(path):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     existing_data = json.load(f)
                     existing_samples = existing_data.get('samples', [])
-                    # Merge with new samples
-                    all_samples = existing_samples + self.samples
-            except (json.JSONDecodeError, FileNotFoundError):
+                    
+                    # Get existing sample IDs to avoid duplicates
+                    existing_ids = {s.get('id') for s in existing_samples if isinstance(s, dict) and 'id' in s}
+                    
+                    # Only add samples that don't already exist in the file
+                    new_samples = [s for s in self.samples if s.get('id') not in existing_ids]
+                    
+                    if new_samples:
+                        all_samples = existing_samples + new_samples
+                    else:
+                        # No new samples, just update metadata
+                        all_samples = existing_samples
+            except (json.JSONDecodeError, FileNotFoundError, KeyError):
+                # If file format is incompatible, start fresh
                 all_samples = self.samples
         else:
             all_samples = self.samples
@@ -222,7 +261,8 @@ class DatasetManager:
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
-        print(f"Saved {len(self.samples)} samples to {path} (total: {len(all_samples)})")
+        num_new = len(all_samples) - len(existing_samples)
+        print(f"Saved {num_new} new sample(s) to {path} (total: {len(all_samples)})")
     
     def load_from_json(self, path: str):
         """

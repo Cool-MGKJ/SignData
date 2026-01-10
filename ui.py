@@ -70,41 +70,6 @@ class ASLDataCollectionUI:
         )
         self.status_label.grid(row=2, column=0, pady=(0, 10))
         
-        # Depth mode selection frame
-        depth_frame = ttk.LabelFrame(left_frame, text="Depth Mode", padding="10")
-        depth_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        
-        self.depth_mode_var = tk.StringVar(value="off")
-        depth_mode_label = ttk.Label(depth_frame, text="Mode:")
-        depth_mode_label.grid(row=0, column=0, padx=(0, 5))
-        
-        self.depth_mode_combo = ttk.Combobox(
-            depth_frame,
-            textvariable=self.depth_mode_var,
-            values=("off", "midas"),
-            state="readonly",
-            width=15
-        )
-        self.depth_mode_combo.grid(row=0, column=1, padx=(0, 10))
-        self.depth_mode_combo.bind("<<ComboboxSelected>>", self._handle_depth_mode_change)
-        
-        # MiDaS status indicator
-        self.midas_status_label = ttk.Label(
-            depth_frame,
-            text="MiDaS: Offline",
-            font=("Arial", 9),
-            foreground="gray"
-        )
-        self.midas_status_label.grid(row=0, column=2, padx=(10, 0))
-        
-        # Hit count display
-        self.hit_count_label = ttk.Label(
-            left_frame,
-            text="Hit Count: 0/160",
-            font=("Arial", 9)
-        )
-        self.hit_count_label.grid(row=4, column=0, pady=(0, 10))
-        
         # Control buttons frame
         controls_frame = ttk.Frame(left_frame)
         controls_frame.grid(row=3, column=0, pady=(0, 10))
@@ -125,9 +90,17 @@ class ASLDataCollectionUI:
         )
         self.stop_button.grid(row=0, column=1, padx=5)
         
+        # Hit count display
+        self.hit_count_label = ttk.Label(
+            left_frame,
+            text="Hit Count: 0/160",
+            font=("Arial", 9)
+        )
+        self.hit_count_label.grid(row=4, column=0, pady=(0, 10))
+        
         # Label input frame
         label_frame = ttk.LabelFrame(left_frame, text="Sign Label", padding="10")
-        label_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        label_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         self.label_entry = ttk.Entry(label_frame, width=30, font=("Arial", 11))
         self.label_entry.grid(row=0, column=0, padx=(0, 5))
@@ -240,12 +213,6 @@ class ASLDataCollectionUI:
             else:
                 messagebox.showerror("Error", "Failed to save sample.")
     
-    def _handle_depth_mode_change(self, event=None):
-        """Handle depth mode combobox selection change."""
-        # Depth mode is now always 'off' (MediaPipe z-only), so this is a no-op
-        # Kept for backward compatibility with the UI
-        pass
-    
     def _handle_export_dataset(self):
         """Handle Export Dataset button click."""
         if self.on_export_dataset:
@@ -307,24 +274,62 @@ class ASLDataCollectionUI:
             hand_info: String describing which hand(s) detected
             label: Optional label for the sample
         """
-        self.recent_sample_text.config(state=tk.NORMAL)
-        self.recent_sample_text.delete(1.0, tk.END)
-        
-        # Format output
-        output = f"Hand: {hand_info}\n"
-        if label:
-            output += f"Label: {label}\n"
-        output += f"Number of points: {len(normalized_points)}\n\n"
-        output += "Normalized 3D Points:\n"
-        output += "-" * 50 + "\n"
-        output += f"{'Index':<8} {'X':<12} {'Y':<12} {'Z':<12}\n"
-        output += "-" * 50 + "\n"
-        
-        for i, (x, y, z) in enumerate(normalized_points):
-            output += f"{i:<8} {x:<12.6f} {y:<12.6f} {z:<12.6f}\n"
-        
-        self.recent_sample_text.insert(tk.END, output)
-        self.recent_sample_text.config(state=tk.DISABLED)
+        try:
+            self.recent_sample_text.config(state=tk.NORMAL)
+            self.recent_sample_text.delete(1.0, tk.END)
+            
+            # Check if normalized_points is valid
+            if not normalized_points:
+                output = "No points available to display.\n"
+                self.recent_sample_text.insert(tk.END, output)
+                self.recent_sample_text.config(state=tk.DISABLED)
+                return
+            
+            # Format output
+            output = f"Hand: {hand_info}\n"
+            if label:
+                output += f"Label: {label}\n"
+            output += f"Number of points: {len(normalized_points)}\n\n"
+            output += "Normalized 3D Points (Numbered):\n"
+            output += "-" * 70 + "\n"
+            output += f"{'No.':<4} {'Landmark':<12} {'X':<12} {'Y':<12} {'Z':<12}\n"
+            output += "-" * 70 + "\n"
+
+            # MediaPipe hand landmark names for reference
+            landmark_names = {
+                0: "wrist", 1: "thumb_cmc", 2: "thumb_mcp", 3: "thumb_ip", 4: "thumb_tip",
+                5: "index_mcp", 6: "index_pip", 7: "index_dip", 8: "index_tip",
+                9: "middle_mcp", 10: "middle_pip", 11: "middle_dip", 12: "middle_tip",
+                13: "ring_mcp", 14: "ring_pip", 15: "ring_dip", 16: "ring_tip",
+                17: "pinky_mcp", 18: "pinky_pip", 19: "pinky_dip", 20: "pinky_tip"
+            }
+
+            # Handle both tuple format and other formats
+            for i, point in enumerate(normalized_points):
+                # Handle different point formats
+                if isinstance(point, (list, tuple)) and len(point) >= 3:
+                    x, y, z = point[0], point[1], point[2]
+                elif isinstance(point, dict):
+                    x = point.get('x', 0.0)
+                    y = point.get('y', 0.0)
+                    z = point.get('z', 0.0)
+                else:
+                    print(f"Warning: Unexpected point format at index {i}: {point}")
+                    continue
+                
+                landmark_name = landmark_names.get(i, f"point_{i}")
+                output += f"{i:2d}. {landmark_name:<12} {x:<12.6f} {y:<12.6f} {z:<12.6f}\n"
+            
+            self.recent_sample_text.insert(tk.END, output)
+            self.recent_sample_text.config(state=tk.DISABLED)
+        except Exception as e:
+            print(f"Error displaying recent sample: {e}")
+            import traceback
+            traceback.print_exc()
+            self.recent_sample_text.config(state=tk.NORMAL)
+            self.recent_sample_text.delete(1.0, tk.END)
+            self.recent_sample_text.insert(tk.END, f"Error displaying sample: {str(e)}\n")
+            self.recent_sample_text.config(state=tk.DISABLED)
     
     def add_sample_to_table(self, sample_id: int, label: str, hand: str, num_points: int):
         """

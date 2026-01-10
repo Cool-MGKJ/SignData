@@ -114,9 +114,6 @@ class FaceGrid3D:
         self.max_grid_pitch_deg = 30.0  # Clamp pitch rotation
         self.head_yaw_deg = 0.0
         self.head_pitch_deg = 0.0
-        
-        # Simple depth mode flag kept for backwards-compatible UI text
-        self.depth_mode = "off"
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -222,10 +219,6 @@ class FaceGrid3D:
         """
         return self.voxel_hit_order.copy() if self.voxel_hit_order else []
     
-    def set_depth_mode(self, depth_mode: str):
-        """Kept for backward compatibility; depth mode is now always 'off' (MediaPipe z-only)."""
-        self.depth_mode = "off"
-    
     def process_frame(self, frame: np.ndarray) -> bool:
         """
         Process a frame to detect face and build/update the 3D voxel grid
@@ -287,30 +280,30 @@ class FaceGrid3D:
         # Use landmark 152 for chin (standard MediaPipe Face Mesh index)
         chin = face_landmarks.landmark[152]
         
-        # Nose center (using nose tip)
+        # Nose center (using nose tip) - this updates with head movement in 3D
         nose_center = (nose_tip.x, nose_tip.y)
         nose_center_z_mp = nose_tip.z  # MediaPipe z (relative depth)
         
         # Get depth at nose pixel using MediaPipe z only (normalized)
         # MediaPipe z is relative and can be negative, so we normalize it.
         # Map typical MediaPipe z range (-0.5 to 0.5) to 0-1.
+        # This depth value updates with head movement forward/backward
         nose_depth = np.clip((nose_center_z_mp + 0.5) / 1.0, 0.0, 1.0)
         if nose_depth < 0.01:  # If too close to 0, use a default
             nose_depth = 0.5
         
+        # Store grid center z for reference - this follows head depth movement
         self.grid_center_z = nose_depth
         
         # Calculate horizontal spacing unit (distance from nose to left eye)
+        # Use 3D distance to account for head movement in depth
         dx_norm = np.sqrt(
             (nose_center[0] - left_eye_center[0]) ** 2 +
             (nose_center[1] - left_eye_center[1]) ** 2
         )
         
-        # Scale by relative depth to keep grid stable
-        if nose_depth > 0:
-            depth_scale = 1.0 / (nose_depth + 0.1)
-            dx_norm = dx_norm * depth_scale
-        
+        # Don't scale by depth - keep grid size constant relative to head size
+        # This ensures the grid moves with the head in 3D space
         if dx_norm < 1e-6:
             dx_norm = 0.05  # Default spacing
         
@@ -345,11 +338,17 @@ class FaceGrid3D:
         sin_yaw = np.sin(yaw_rad)
         
         # Estimate head pitch (rotation around horizontal axis) using forehead-chin vector
+        # When nodding down: chin.y increases (down), chin.z increases (forward)
+        # In MediaPipe: y increases downward, z increases forward
         vertical_vector_3d = np.array([
             chin.x - forehead.x,
             chin.y - forehead.y,
             chin.z - forehead.z
         ])
+        # Calculate pitch angle: arctan2(dz, dy) gives angle from vertical
+        # When nodding down: dy > 0 (chin down), dz > 0 (chin forward)
+        # arctan2(dz, dy) gives positive angle when both are positive (nodding down)
+        # This is the correct pitch angle - don't invert
         pitch_rad = np.arctan2(vertical_vector_3d[2], vertical_vector_3d[1] + 1e-6)
         pitch_rad = np.clip(
             pitch_rad,
@@ -382,16 +381,22 @@ class FaceGrid3D:
                     # Each layer is spaced by dz_norm
                     offset_z = z_idx * dz_norm
                     
-                    # Rotate offsets around the vertical axis (yaw)
+                    # Rotate offsets around the vertical axis (yaw) first
                     rotated_x = offset_x * cos_yaw + offset_z * sin_yaw
-                    rotated_z = -offset_x * sin_yaw + offset_z * cos_yaw
+                    rotated_z_after_yaw = -offset_x * sin_yaw + offset_z * cos_yaw
                     
                     # Rotate around horizontal axis (pitch) after yaw rotation
-                    # Note: positive pitch (looking down) should move grid up, negative pitch (looking up) should move grid down
-                    rotated_y = offset_y * cos_pitch + rotated_z * sin_pitch
-                    rotated_z_pitch = -offset_y * sin_pitch + rotated_z * cos_pitch
+                    # When nodding down (positive pitch), both layers should tilt down together
+                    # The key is to ensure both near and far layers rotate around the same pivot (nose)
+                    # Try inverting the rotation matrix to fix far layer moving opposite
+                    # Standard rotation: y' = y*cos - z*sin, z' = y*sin + z*cos
+                    # For MediaPipe (y down, z forward), when nodding down we want z forward to move down
+                    # So we use: y' = y*cos + z*sin, z' = -y*sin + z*cos
+                    # But if far layer moves opposite, try: y' = y*cos - z*sin, z' = y*sin + z*cos
+                    rotated_y = offset_y * cos_pitch - rotated_z_after_yaw * sin_pitch
+                    rotated_z_pitch = offset_y * sin_pitch + rotated_z_after_yaw * cos_pitch
                     
-                    # Create voxel center in normalized space
+                    # Create voxel center in normalized space (add rotated offsets to nose center)
                     voxel_x = nose_center[0] + rotated_x
                     voxel_y = np.clip(nose_center[1] + rotated_y, 0.0, 1.0)
                     voxel_z = nose_depth + rotated_z_pitch  # Relative to nose depth
@@ -442,29 +447,58 @@ class FaceGrid3D:
                 
                 # Get depth for this landmark using MediaPipe z (normalized 0-1)
                 # Map typical MediaPipe z range (-0.5 to 0.5) to 0-1.
+                # Smaller z_mp values mean closer to camera (more negative = closer)
+                # Larger z_mp values mean farther from camera (more positive = farther)
                 lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
                 if lz_depth < 0.01:
                     lz_depth = 0.5
                 
-                # Find nearest voxel center in true 3D space
+                # Determine which depth layer to check based on hand depth
+                # Closer hands (smaller lz_depth) should hit near layer (z_idx=0)
+                # Farther hands (larger lz_depth) should hit far layer (z_idx=1)
+                # Get nose depth for reference
+                nose_depth = self.voxel_centers[0][2] if self.voxel_centers else 0.5
+                
+                # Calculate depth difference from nose
+                depth_diff = lz_depth - nose_depth
+                
+                # Determine target layer: closer = layer 0, farther = layer 1
+                if depth_diff < -0.1:  # Hand is closer than nose
+                    target_z_idx = 0  # Near layer
+                elif depth_diff > 0.1:  # Hand is farther than nose
+                    target_z_idx = min(1, self.depth_layers - 1)  # Far layer
+                else:  # Hand is at similar depth to nose
+                    target_z_idx = 0  # Default to near layer
+                
+                # Find nearest voxel in the target depth layer
                 min_dist = float('inf')
                 nearest_voxel_idx = -1
                 
-                for voxel_idx, (vx, vy, vz) in enumerate(self.voxel_centers):
-                    # Calculate true 3D Euclidean distance in normalized space
-                    # All dimensions (x, y, z) are treated equally
-                    dist = np.sqrt(
+                # Calculate which voxels belong to the target layer
+                voxels_per_layer = self.breadth * self.length
+                layer_start_idx = target_z_idx * voxels_per_layer
+                layer_end_idx = (target_z_idx + 1) * voxels_per_layer
+                
+                # Only check voxels in the target depth layer
+                for voxel_idx in range(layer_start_idx, min(layer_end_idx, len(self.voxel_centers))):
+                    vx, vy, vz = self.voxel_centers[voxel_idx]
+                    
+                    # Calculate 2D distance (x, y) - depth is already matched by layer selection
+                    dist_2d = np.sqrt(
                         (lx_norm - vx) ** 2 +
-                        (ly_norm - vy) ** 2 +
-                        (lz_depth - vz) ** 2
+                        (ly_norm - vy) ** 2
                     )
+                    
+                    # Add small depth penalty to prefer exact depth match
+                    depth_penalty = abs(lz_depth - vz) * 0.1
+                    dist = dist_2d + depth_penalty
                     
                     if dist < min_dist:
                         min_dist = dist
                         nearest_voxel_idx = voxel_idx
                 
-                # Hit the nearest voxel if within the 3D hit radius
-                # No separate depth tolerance check - pure 3D distance determines hit
+                # Hit the nearest voxel if within the hit radius
+                # Use 2D hit radius since we're matching by depth layer
                 if nearest_voxel_idx >= 0 and min_dist <= self.hit_radius_norm:
                     if not self.voxel_hit_bool[nearest_voxel_idx]:
                         self.voxel_hit_bool[nearest_voxel_idx] = True
@@ -482,7 +516,7 @@ class FaceGrid3D:
         frame: np.ndarray,
         show_hits: bool = True,
         selected_landmark: Optional[int] = None,
-        show_indices: bool = False
+        show_indices: bool = True  # Always show indices by default
     ) -> np.ndarray:
         """
         Draw the 3D voxel grid on the frame with proper 3D layered rendering (back-to-front).
@@ -521,15 +555,15 @@ class FaceGrid3D:
         # Sort by z-depth (farthest first, so nearer voxels overlay)
         voxel_draw_list.sort(key=lambda x: x[3], reverse=True)
         
-        # Colors for different depth layers (near to far)
+        # Colors for different depth layers (near to far) - more distinguishable
         layer_colors = [
-            np.array((0, 255, 0)),      # Near layer - green
-            np.array((0, 200, 255)),    # Middle layer - yellow/orange
-            np.array((0, 100, 255)),    # Far layer - orange/red
+            np.array((0, 255, 0)),      # Near layer - bright green
+            np.array((0, 255, 255)),    # Middle layer - bright yellow
+            np.array((255, 0, 255)),    # Far layer - bright magenta
         ]
         # Extend colors if more than 3 layers
         while len(layer_colors) < self.depth_layers:
-            layer_colors.append(np.array((100, 100, 255)))  # Default red-ish for extra layers
+            layer_colors.append(np.array((255, 255, 0)))  # Default bright cyan for extra layers
 
         # Draw voxels back-to-front
         for voxel_idx, u, v, z_norm, z_idx in voxel_draw_list:
@@ -542,30 +576,42 @@ class FaceGrid3D:
             
             if show_hits and is_hit:
                 # Bright color for hit voxels, larger for nearer layers
-                brightness = 0.6 + layer_depth_factor * 0.4
+                brightness = 0.8 + layer_depth_factor * 0.2
                 color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
                 color = tuple(int(c * 255) for c in color_vec)
-                base_radius = 5
-                radius = max(3, int(base_radius * (0.7 + layer_depth_factor * 0.5)))
+                base_radius = 6
+                radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
             else:
                 # Dimmer color for unhit voxels, smaller for farther layers
-                brightness = 0.3 + layer_depth_factor * 0.3
+                brightness = 0.4 + layer_depth_factor * 0.3
                 color_vec = base_color * brightness / 255.0
                 color = tuple(int(c * 255) for c in np.clip(color_vec, 0, 1))
-                base_radius = 3
-                radius = max(2, int(base_radius * (0.5 + layer_depth_factor * 0.5)))
+                base_radius = 4
+                radius = max(3, int(base_radius * (0.6 + layer_depth_factor * 0.4)))
             
             # Draw circle for voxel
             cv2.circle(annotated_frame, (u, v), radius, color, -1)
 
             if show_indices:
-                label_color = (255, 255, 255) if z_idx == 0 else (200, 200, 200)
+                # Enhanced number visibility with better contrast
+                label_color = (255, 255, 255)  # Always white for better visibility
+                # Add a small black outline for better contrast
                 cv2.putText(
                     annotated_frame,
                     str(voxel_idx),
                     (u + 2, v - 2),
                     cv2.FONT_HERSHEY_PLAIN,
-                    0.6,
+                    0.8,  # Slightly larger font
+                    (0, 0, 0),  # Black outline
+                    2,  # Thicker outline
+                    cv2.LINE_AA
+                )
+                cv2.putText(
+                    annotated_frame,
+                    str(voxel_idx),
+                    (u + 2, v - 2),
+                    cv2.FONT_HERSHEY_PLAIN,
+                    0.8,  # Slightly larger font
                     label_color,
                     1,
                     cv2.LINE_AA

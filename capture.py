@@ -376,7 +376,7 @@ class HandCapture:
         self.face_grid_tracker = FaceGrid3D(
             breadth=8,
             length=10,
-            depth_layers=3,  # 3 layers: near, middle, far
+            depth_layers=2,  # 2 layers as requested
             track_landmark_paths=True,
             tracked_landmarks=[8, 4]  # index_tip, thumb_tip
         )
@@ -522,7 +522,7 @@ class HandCapture:
                 annotated_frame,
                 show_hits=show_hits,
                 selected_landmark=selected_landmark,
-                show_indices=False
+                show_indices=True  # Show grid point numbers
             )
         
         return annotated_frame, landmarks_list
