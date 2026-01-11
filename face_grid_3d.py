@@ -98,6 +98,16 @@ class FaceGrid3D:
             min_tracking_confidence=0.5
         )
         
+        # Initialize MediaPipe Pose for shoulder detection
+        self.mp_pose = mp.solutions.pose
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
         # Grid state
         self.voxel_centers = None  # List of (x, y, z) tuples in normalized coordinates
         self.voxel_centers_2d = None  # List of (u, v) tuples in pixel coordinates (for visualization)
@@ -123,6 +133,11 @@ class FaceGrid3D:
         self.layer_z_positions = None  # List of z-positions relative to face, one per layer [z_layer0, z_layer1, ...]
         self.initial_trigger_z = None  # Initial trigger z-position when capture starts
         self.z_matching_tolerance = 0.25  # Tolerance for z-coordinate matching (increased to allow 2nd layer triggering)
+        
+        # Dynamic depth scaling system
+        self.reference_length = None  # Shoulder-to-shoulder or wrist-to-elbow distance
+        self.face_z_reference = None  # Face plane Z reference (nose or mid-shoulders Z)
+        self.last_pose_results = None  # Store last pose detection results
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -135,6 +150,9 @@ class FaceGrid3D:
         # Reset layer z-positions (will be captured when capture starts)
         self.layer_z_positions = None
         self.initial_trigger_z = None
+        # Reset dynamic depth scaling (will be recalculated)
+        self.reference_length = None
+        self.face_z_reference = None
     
     def update_layer_z_positions_relative_to_face(self):
         """
@@ -294,6 +312,109 @@ class FaceGrid3D:
         """
         return self.voxel_hit_order.copy() if self.voxel_hit_order else []
     
+    def calculate_reference_length_from_pose(self, pose_results) -> Optional[float]:
+        """
+        Calculate reference length from pose landmarks (shoulder-to-shoulder or wrist-to-elbow).
+        
+        Args:
+            pose_results: MediaPipe Pose results
+            
+        Returns:
+            Reference length in normalized 3D space, or None if not available
+        """
+        if pose_results is None or not pose_results.pose_landmarks:
+            return None
+        
+        landmarks = pose_results.pose_landmarks.landmark
+        
+        # MediaPipe Pose landmark indices
+        LEFT_SHOULDER = 11
+        RIGHT_SHOULDER = 12
+        LEFT_WRIST = 15
+        LEFT_ELBOW = 13
+        RIGHT_WRIST = 16
+        RIGHT_ELBOW = 14
+        
+        # Try shoulder-to-shoulder first (preferred)
+        left_shoulder = landmarks[LEFT_SHOULDER]
+        right_shoulder = landmarks[RIGHT_SHOULDER]
+        
+        if (left_shoulder.visibility > 0.5 and right_shoulder.visibility > 0.5):
+            # Calculate 3D Euclidean distance between shoulders
+            shoulder_distance = np.sqrt(
+                (left_shoulder.x - right_shoulder.x) ** 2 +
+                (left_shoulder.y - right_shoulder.y) ** 2 +
+                (left_shoulder.z - right_shoulder.z) ** 2
+            )
+            if shoulder_distance > 0.01:  # Valid distance
+                return shoulder_distance
+        
+        # Fallback: Use wrist-to-elbow distance (try left first, then right)
+        left_wrist = landmarks[LEFT_WRIST]
+        left_elbow = landmarks[LEFT_ELBOW]
+        right_wrist = landmarks[RIGHT_WRIST]
+        right_elbow = landmarks[RIGHT_ELBOW]
+        
+        # Try left arm
+        if (left_wrist.visibility > 0.5 and left_elbow.visibility > 0.5):
+            wrist_elbow_distance = np.sqrt(
+                (left_wrist.x - left_elbow.x) ** 2 +
+                (left_wrist.y - left_elbow.y) ** 2 +
+                (left_wrist.z - left_elbow.z) ** 2
+            )
+            if wrist_elbow_distance > 0.01:  # Valid distance
+                return wrist_elbow_distance
+        
+        # Try right arm
+        if (right_wrist.visibility > 0.5 and right_elbow.visibility > 0.5):
+            wrist_elbow_distance = np.sqrt(
+                (right_wrist.x - right_elbow.x) ** 2 +
+                (right_wrist.y - right_elbow.y) ** 2 +
+                (right_wrist.z - right_elbow.z) ** 2
+            )
+            if wrist_elbow_distance > 0.01:  # Valid distance
+                return wrist_elbow_distance
+        
+        return None
+    
+    def calculate_face_z_reference(self, face_landmarks) -> Optional[float]:
+        """
+        Calculate face Z reference (zero-point calibration) from nose or mid-shoulders.
+        
+        Args:
+            face_landmarks: MediaPipe Face Mesh landmarks
+            
+        Returns:
+            Face Z reference value (MediaPipe z coordinate), or None if not available
+        """
+        if face_landmarks is None:
+            return None
+        
+        # Use nose tip Z as face plane reference
+        nose_tip = face_landmarks.landmark[self.NOSE_TIP]
+        return nose_tip.z
+    
+    def calculate_relative_z(self, raw_z: float) -> Optional[float]:
+        """
+        Transform raw Z value to relative Z using dynamic depth scaling.
+        
+        Formula: Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length
+        
+        Args:
+            raw_z: Raw MediaPipe Z coordinate
+            
+        Returns:
+            Relative Z value, or None if reference values not available
+        """
+        if self.face_z_reference is None or self.reference_length is None:
+            return None
+        
+        if self.reference_length <= 0:
+            return None
+        
+        relative_z = (raw_z - self.face_z_reference) / self.reference_length
+        return relative_z
+    
     def process_frame(self, frame: np.ndarray) -> bool:
         """
         Process a frame to detect face and build/update the 3D voxel grid
@@ -314,6 +435,16 @@ class FaceGrid3D:
         # Convert BGR to RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_frame.flags.writeable = False
+        
+        # Process with Pose for reference length calculation
+        if self.pose is not None:
+            pose_results = self.pose.process(rgb_frame)
+            self.last_pose_results = pose_results
+            
+            # Calculate reference length from pose
+            ref_length = self.calculate_reference_length_from_pose(pose_results)
+            if ref_length is not None:
+                self.reference_length = ref_length
         
         # Process with Face Mesh
         results = self.face_mesh.process(rgb_frame)
@@ -369,6 +500,11 @@ class FaceGrid3D:
         
         # Store grid center z for reference - this follows head depth movement
         self.grid_center_z = nose_depth
+        
+        # Calculate and store face Z reference (zero-point calibration)
+        face_z_ref = self.calculate_face_z_reference(face_landmarks)
+        if face_z_ref is not None:
+            self.face_z_reference = face_z_ref
         
         # Calculate horizontal spacing unit (distance from nose to left eye)
         # Use 3D distance to account for head movement in depth
@@ -636,32 +772,57 @@ class FaceGrid3D:
             else:
                 self.current_trigger_point_2d = None
             
-            # Get depth for trigger point using MediaPipe z (normalized 0-1)
-            lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
-            if lz_depth < 0.01:
-                lz_depth = 0.5
+            # Dynamic Depth Scaling: Transform raw Z to relative Z
+            # Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length
+            relative_z = self.calculate_relative_z(lz_mp)
             
-            # Zone-based layer switching based on Z depth
-            # Zone 0 (Far Zone / Near Face): 0.350 <= z <= 0.500 → Layer 0 (Voxels 0-79)
-            # Zone 1 (Near Zone / Near Camera): 0.100 <= z < 0.350 → Layer 1 (Voxels 80-159)
             matching_layer_idx = None
             zone = None
             
-            if 0.350 <= lz_depth <= 0.500:
-                # Zone 0: Far Zone / Near Face → Layer 0
-                matching_layer_idx = 0
-                zone = 0
-            elif 0.100 <= lz_depth < 0.350:
-                # Zone 1: Near Zone / Near Camera → Layer 1
-                matching_layer_idx = 1
-                zone = 1
+            if relative_z is not None:
+                # Dynamic Layer Switching based on Relative Z:
+                # Order: Camera → Layer 1 → Layer 0 → Face
+                # In MediaPipe: smaller Z = closer to camera, larger Z = farther from camera
+                # Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length
+                # - Negative Relative_Z = hand closer to camera than face (extended forward)
+                # - Zero Relative_Z = hand at face plane
+                # - Positive Relative_Z = hand farther from camera than face
+                
+                # Layer 1 (near camera): Relative_Z < 0 (hand extended toward camera)
+                # Layer 0 (near face): Relative_Z >= 0 (hand at or behind face plane)
+                
+                if relative_z < 0:
+                    # Layer 1: Hand is closer to camera than face (extended forward)
+                    matching_layer_idx = 1
+                    zone = 1
+                elif relative_z >= 0:
+                    # Layer 0: Hand is at face plane or farther (near face/body)
+                    matching_layer_idx = 0
+                    zone = 0
+                else:
+                    # Shouldn't reach here, but just in case
+                    matching_layer_idx = None
+                    zone = None
             else:
-                # Outside valid zones - don't trigger any layer
-                matching_layer_idx = None
-                zone = None
-                print(f"Trigger z={lz_depth:.3f} is outside valid zones (Zone 0: 0.350-0.500, Zone 1: 0.100-0.350)")
+                # Fallback: If reference values not available, use raw Z with old logic
+                # This should only happen during initialization
+                lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
+                if lz_depth < 0.01:
+                    lz_depth = 0.5
+                
+                # Fallback zone-based switching (temporary until calibration)
+                if 0.350 <= lz_depth <= 0.500:
+                    matching_layer_idx = 0
+                    zone = 0
+                elif 0.100 <= lz_depth < 0.350:
+                    matching_layer_idx = 1
+                    zone = 1
+                else:
+                    matching_layer_idx = None
+                    zone = None
+                    print(f"[Fallback] Trigger z={lz_depth:.3f} is outside valid zones (calibration needed)")
             
-            # If no matching layer found (outside valid zones), don't trigger any points
+            # If no matching layer found, don't trigger any points
             if matching_layer_idx is None:
                 continue
             
@@ -672,9 +833,15 @@ class FaceGrid3D:
             layer_start_idx = matching_layer_idx * voxels_per_layer
             layer_end_idx = layer_start_idx + voxels_per_layer
             
-            # Debug output to verify layer switching based on Z-depth zones
-            zone_name = "Far Zone (Near Face)" if zone == 0 else "Near Zone (Near Camera)"
-            print(f"[Zone {zone}] Trigger z={lz_depth:.3f} → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
+            # Debug output to verify layer switching based on dynamic depth scaling
+            if relative_z is not None:
+                zone_name = "Layer 0 (Near Face)" if zone == 0 else "Layer 1 (Near Camera)"
+                print(f"[Zone {zone}] Relative_Z={relative_z:.3f} (raw_z={lz_mp:.3f}, ref_len={self.reference_length:.4f}, face_z_ref={self.face_z_reference:.3f}) → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
+            else:
+                # Fallback mode
+                lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
+                zone_name = "Far Zone (Near Face)" if zone == 0 else "Near Zone (Near Camera)"
+                print(f"[Zone {zone}] [Fallback] Trigger z={lz_depth:.3f} → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
             
             # Find nearest voxel within the matching layer (check x, y only since z already matched)
             min_dist_2d = float('inf')
