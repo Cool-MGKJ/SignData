@@ -935,17 +935,19 @@ class FaceGrid3D:
             base_color = layer_colors[min(z_idx, len(layer_colors) - 1)]
             
             if show_hits and is_hit:
-                # Far layer (z_idx=1) should be red when triggered
-                if z_idx == 1:  # Far layer (layer 1, points 80-159)
-                    color = (0, 0, 255)  # Red in BGR
+                # Layer 1 (z_idx=1, near camera) should be bright red when triggered
+                if z_idx == 1:  # Layer 1 (near camera, points 80-159)
+                    color = (0, 0, 255)  # Bright red in BGR format
                     brightness = 1.0
+                    base_radius = 8  # Larger radius for Layer 1 to make it more visible
+                    radius = max(6, int(base_radius * (0.9 + layer_depth_factor * 0.1)))
                 else:
                     # Bright color for hit voxels in other layers, larger for nearer layers
                     brightness = 0.8 + layer_depth_factor * 0.2
                     color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
                     color = tuple(int(c * 255) for c in color_vec)
-                base_radius = 6
-                radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
+                    base_radius = 6
+                    radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
             else:
                 # Dimmer color for unhit voxels, smaller for farther layers
                 brightness = 0.4 + layer_depth_factor * 0.3
@@ -998,11 +1000,11 @@ class FaceGrid3D:
             
             if len(path_points) > 1:
                 pts = np.array(path_points, np.int32)
-                # Draw a bright magenta line to show the path
-                cv2.polylines(annotated_frame, [pts], False, (255, 0, 255), 3)
-                # Also draw small circles at each point in the path for visibility
+                # Draw a bright magenta line to show the path (reduced thickness)
+                cv2.polylines(annotated_frame, [pts], False, (255, 0, 255), 1)
+                # Also draw small circles at each point in the path for visibility (reduced size)
                 for pt in path_points:
-                    cv2.circle(annotated_frame, pt, 3, (255, 0, 255), -1)
+                    cv2.circle(annotated_frame, pt, 2, (255, 0, 255), -1)
         
         # Draw trigger point (palm center based on finger spread)
         if self.current_trigger_point_2d is not None:
