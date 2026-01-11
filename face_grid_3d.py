@@ -641,57 +641,40 @@ class FaceGrid3D:
             if lz_depth < 0.01:
                 lz_depth = 0.5
             
-            # Continuously update layer z-positions relative to face (they're updated in process_frame)
-            # Now match based on relative z-offsets from face depth for more robust matching
+            # Zone-based layer switching based on Z depth
+            # Zone 0 (Far Zone / Near Face): 0.350 <= z <= 0.500 → Layer 0 (Voxels 0-79)
+            # Zone 1 (Near Zone / Near Camera): 0.100 <= z < 0.350 → Layer 1 (Voxels 80-159)
             matching_layer_idx = None
-            min_z_offset_diff = float('inf')
-            trigger_z_offset = 0.0
-            if self.voxel_centers is not None and self.layer_z_positions is not None:
-                # Get current face depth
-                face_depth = self.grid_center_z if self.grid_center_z is not None else 0.5
-                
-                # Calculate trigger z-offset relative to face depth
-                trigger_z_offset = lz_depth - face_depth
-                
-                voxels_per_layer = self.breadth * self.length
-                
-                # For each layer, calculate z-offset difference (using stored relative offsets)
-                for layer_idx in range(self.depth_layers):
-                    layer_z_offset = self.layer_z_positions[layer_idx]
-                    
-                    # Calculate difference between trigger offset and layer offset
-                    z_offset_diff = abs(trigger_z_offset - layer_z_offset)
-                    
-                    # Find the layer with the smallest z-offset difference
-                    # Invert layer_idx so that layer 1 (far) triggers when hand is closer (smaller z)
-                    # and layer 0 (near) triggers when hand is farther (larger z)
-                    if z_offset_diff < min_z_offset_diff:
-                        min_z_offset_diff = z_offset_diff
-                        # Invert: layer 0 becomes farthest layer, layer 1 becomes nearest layer
-                        matching_layer_idx = self.depth_layers - 1 - layer_idx
-                
-                # Only use the matching layer if z-offset difference is within tolerance
-                if matching_layer_idx is not None and min_z_offset_diff > self.z_matching_tolerance:
-                    # Too far from any layer - don't trigger
-                    matching_layer_idx = None
-                    print(f"Trigger z_offset={trigger_z_offset:.3f} (z={lz_depth:.3f}) too far from all layers (min_offset_diff={min_z_offset_diff:.3f}, tolerance={self.z_matching_tolerance:.3f})")
+            zone = None
             
-            # If no matching layer found, don't trigger any points
-            # This allows the trigger to move between layers continuously
+            if 0.350 <= lz_depth <= 0.500:
+                # Zone 0: Far Zone / Near Face → Layer 0
+                matching_layer_idx = 0
+                zone = 0
+            elif 0.100 <= lz_depth < 0.350:
+                # Zone 1: Near Zone / Near Camera → Layer 1
+                matching_layer_idx = 1
+                zone = 1
+            else:
+                # Outside valid zones - don't trigger any layer
+                matching_layer_idx = None
+                zone = None
+                print(f"Trigger z={lz_depth:.3f} is outside valid zones (Zone 0: 0.350-0.500, Zone 1: 0.100-0.350)")
+            
+            # If no matching layer found (outside valid zones), don't trigger any points
             if matching_layer_idx is None:
                 continue
             
             # Only check voxels in the matching layer
+            # This ensures that if a hand landmark is in Zone 0, it is mathematically impossible
+            # for it to trigger a voxel in Layer 1, even if they coincide in X/Y coordinates
             voxels_per_layer = self.breadth * self.length
             layer_start_idx = matching_layer_idx * voxels_per_layer
             layer_end_idx = layer_start_idx + voxels_per_layer
             
-            # Debug output to verify layer switching
-            face_depth = self.grid_center_z if self.grid_center_z is not None else 0.5
-            trigger_z_offset = lz_depth - face_depth
-            layer_z_offset = self.layer_z_positions[matching_layer_idx] if matching_layer_idx is not None and self.layer_z_positions is not None else 0.0
-            layer_z_absolute = face_depth + layer_z_offset
-            print(f"Trigger z_offset={trigger_z_offset:.3f} (z={lz_depth:.3f}), Layer {matching_layer_idx} (voxels {layer_start_idx}-{layer_end_idx-1}) layer_offset={layer_z_offset:.3f} (z={layer_z_absolute:.3f}), offset_diff={min_z_offset_diff:.3f}")
+            # Debug output to verify layer switching based on Z-depth zones
+            zone_name = "Far Zone (Near Face)" if zone == 0 else "Near Zone (Near Camera)"
+            print(f"[Zone {zone}] Trigger z={lz_depth:.3f} → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
             
             # Find nearest voxel within the matching layer (check x, y only since z already matched)
             min_dist_2d = float('inf')
