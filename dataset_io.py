@@ -25,7 +25,8 @@ class DatasetManager:
         label: str,
         normalized_points: List[Tuple[float, float, float]],
         hand: str = "unknown",
-        hit_order: Optional[List[int]] = None
+        hit_order: Optional[List[int]] = None,
+        chain_code: Optional[List[int]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -65,11 +66,12 @@ class DatasetManager:
             'points_flat': flattened_points,  # Keep for backward compatibility
             'num_points': len(normalized_points),
             'timestamp': datetime.now().isoformat(),
-            'hit_order': hit_order if hit_order is not None else []
+            'hit_order': hit_order if hit_order is not None else [],
+            'chain_code': chain_code if chain_code is not None else []
         }
 
         self.samples.append(sample)
-        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}")
+        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}")
         return sample_id
     
     def get_all_samples(self) -> List[dict]:

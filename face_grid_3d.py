@@ -10,6 +10,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from typing import Optional, List, Tuple, Dict
+from difflib import SequenceMatcher
 
 
 # MediaPipe Hand landmark indices (for path tracking)
@@ -23,6 +24,48 @@ LANDMARK_NAMES = {
     13: "ring_mcp", 14: "ring_pip", 10: "ring_dip", 16: "ring_tip",
     110: "pinky_mcp", 18: "pinky_pip", 19: "pinky_dip", 20: "pinky_tip"
 }
+
+# 26-directional chain code constants (3D unit vectors)
+# 6 face directions (orthogonal): ±x, ±y, ±z
+# 12 edge directions (diagonal on one plane): ±x±y, ±x±z, ±y±z (no zero)
+# 8 corner directions (diagonal in all 3 axes): ±x±y±z (all non-zero)
+DIRECTION_26 = np.array([
+    # 6 face directions (0-5)
+    [ 1,  0,  0],  # 0: +x
+    [-1,  0,  0],  # 1: -x
+    [ 0,  1,  0],  # 2: +y
+    [ 0, -1,  0],  # 3: -y
+    [ 0,  0,  1],  # 4: +z
+    [ 0,  0, -1],  # 5: -z
+    # 12 edge directions (6-17)
+    [ 1,  1,  0],  # 6: +x+y
+    [ 1, -1,  0],  # 7: +x-y
+    [-1,  1,  0],  # 8: -x+y
+    [-1, -1,  0],  # 9: -x-y
+    [ 1,  0,  1],  # 10: +x+z
+    [ 1,  0, -1],  # 11: +x-z
+    [-1,  0,  1],  # 12: -x+z
+    [-1,  0, -1],  # 13: -x-z
+    [ 0,  1,  1],  # 14: +y+z
+    [ 0,  1, -1],  # 15: +y-z
+    [ 0, -1,  1],  # 16: -y+z
+    [ 0, -1, -1],  # 17: -y-z
+    # 8 corner directions (18-25)
+    [ 1,  1,  1],  # 18: +x+y+z
+    [ 1,  1, -1],  # 19: +x+y-z
+    [ 1, -1,  1],  # 20: +x-y+z
+    [ 1, -1, -1],  # 21: +x-y-z
+    [-1,  1,  1],  # 22: -x+y+z
+    [-1,  1, -1],  # 23: -x+y-z
+    [-1, -1,  1],  # 24: -x-y+z
+    [-1, -1, -1],  # 25: -x-y-z
+], dtype=np.float32)
+
+# Normalize all direction vectors to unit length
+for i in range(len(DIRECTION_26)):
+    norm = np.linalg.norm(DIRECTION_26[i])
+    if norm > 0:
+        DIRECTION_26[i] = DIRECTION_26[i] / norm
 
 
 class FaceGrid3D:
@@ -138,6 +181,11 @@ class FaceGrid3D:
         self.reference_length = None  # Shoulder-to-shoulder or wrist-to-elbow distance
         self.face_z_reference = None  # Face plane Z reference (nose or mid-shoulders Z)
         self.last_pose_results = None  # Store last pose detection results
+        
+        # 26-directional chain code validation system
+        self.current_gesture_chain = []  # List of direction indices (0-25) representing movement trajectory
+        self.jitter_threshold = 0.02  # Minimum movement distance to record a direction change
+        self.is_capturing_chain = False  # Flag to track if chain code should be updated (only during capture)
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -153,6 +201,18 @@ class FaceGrid3D:
         # Reset dynamic depth scaling (will be recalculated)
         self.reference_length = None
         self.face_z_reference = None
+        # Reset chain code tracking
+        self.current_gesture_chain = []
+        self.is_capturing_chain = False
+    
+    def start_chain_capture(self):
+        """Start capturing chain code (call when capture starts)."""
+        self.is_capturing_chain = True
+        self.current_gesture_chain = []  # Reset chain code at start of capture
+    
+    def stop_chain_capture(self):
+        """Stop capturing chain code (call when capture stops)."""
+        self.is_capturing_chain = False
     
     def update_layer_z_positions_relative_to_face(self):
         """
@@ -311,6 +371,149 @@ class FaceGrid3D:
         Get the ordered list of voxel indices representing the hit sequence.
         """
         return self.voxel_hit_order.copy() if self.voxel_hit_order else []
+    
+    def get_chain_code(self) -> List[int]:
+        """
+        Get the current gesture chain code (sequence of direction indices 0-25).
+        """
+        return self.current_gesture_chain.copy()
+    
+    def _update_chain_code(self, voxel_idx: int):
+        """
+        Update the chain code when a new voxel is hit.
+        
+        Calculates the 3D direction vector from the previous voxel to the current one,
+        finds the closest match among the 26 directions using cosine similarity,
+        and appends the direction index to the chain code.
+        
+        Args:
+            voxel_idx: Index of the newly hit voxel
+        """
+        # Only update chain code during capture
+        if not self.is_capturing_chain:
+            return
+            
+        if self.voxel_centers is None or voxel_idx >= len(self.voxel_centers):
+            return
+        
+        # Need at least 2 points to calculate a direction
+        if len(self.voxel_hit_order) < 2:
+            return
+        
+        # Get the previous voxel index (second to last in the order)
+        prev_voxel_idx = self.voxel_hit_order[-2]
+        
+        # Get 3D positions of previous and current voxels
+        prev_x, prev_y, prev_z = self.voxel_centers[prev_voxel_idx]
+        curr_x, curr_y, curr_z = self.voxel_centers[voxel_idx]
+        
+        # Calculate direction vector
+        direction_vec = np.array([
+            curr_x - prev_x,
+            curr_y - prev_y,
+            curr_z - prev_z
+        ], dtype=np.float32)
+        
+        # Check if movement exceeds jitter threshold
+        movement_distance = np.linalg.norm(direction_vec)
+        if movement_distance < self.jitter_threshold:
+            return  # Movement too small, ignore
+        
+        # Normalize the direction vector
+        if movement_distance > 0:
+            direction_vec = direction_vec / movement_distance
+        
+        # Find the closest match among the 26 directions using cosine similarity
+        # Cosine similarity: cos(θ) = dot(v1, v2) / (|v1| * |v2|)
+        # Since both are normalized, cos(θ) = dot(v1, v2)
+        # Higher cosine similarity = more similar direction
+        max_similarity = -1.0
+        best_direction_idx = 0
+        
+        for idx, dir_vec in enumerate(DIRECTION_26):
+            # Both vectors are normalized, so cosine similarity is just the dot product
+            similarity = np.dot(direction_vec, dir_vec)
+            if similarity > max_similarity:
+                max_similarity = similarity
+                best_direction_idx = idx
+        
+        # Only append if it's different from the last recorded direction
+        # This handles variable movement speeds by not duplicating consecutive directions
+        if len(self.current_gesture_chain) == 0 or self.current_gesture_chain[-1] != best_direction_idx:
+            self.current_gesture_chain.append(best_direction_idx)
+    
+    def validate_chain_code(self, target_signature: List[int], similarity_threshold: float = 0.8) -> Tuple[bool, float]:
+        """
+        Validate the current gesture chain code against a target signature using Levenshtein distance.
+        
+        Args:
+            target_signature: List of direction indices (0-25) representing the expected gesture
+            similarity_threshold: Minimum similarity ratio (0.0 to 1.0) to consider a match (default: 0.8)
+            
+        Returns:
+            Tuple of (is_valid, similarity_ratio)
+            - is_valid: True if similarity >= threshold
+            - similarity_ratio: Similarity score between 0.0 and 1.0
+        """
+        if not self.current_gesture_chain or not target_signature:
+            return False, 0.0
+        
+        # Use SequenceMatcher for similarity (Levenshtein-like distance)
+        # Convert lists to strings for SequenceMatcher
+        current_str = ''.join([str(d) + ',' for d in self.current_gesture_chain])
+        target_str = ''.join([str(d) + ',' for d in target_signature])
+        
+        matcher = SequenceMatcher(None, current_str, target_str)
+        similarity_ratio = matcher.ratio()
+        
+        is_valid = similarity_ratio >= similarity_threshold
+        return is_valid, similarity_ratio
+    
+    def validate_gesture(self, target_signature: List[int], required_layers: Optional[List[int]] = None, 
+                        similarity_threshold: float = 0.8) -> Tuple[bool, str]:
+        """
+        Comprehensive gesture validation combining layer sequence and chain code validation.
+        
+        Args:
+            target_signature: List of direction indices (0-25) representing the expected gesture chain code
+            required_layers: Optional list of layer indices that must be hit (e.g., [1, 0] means layer 1 then layer 0)
+            similarity_threshold: Minimum chain code similarity ratio (default: 0.8)
+            
+        Returns:
+            Tuple of (is_valid, validation_message)
+            - is_valid: True if both layer sequence and chain code are valid
+            - validation_message: Description of validation result
+        """
+        # Check layer sequence if required
+        if required_layers is not None and len(required_layers) > 0:
+            # Extract layers from hit voxels
+            hit_layers = []
+            for voxel_idx in self.voxel_hit_order:
+                z_idx = voxel_idx // (self.breadth * self.length)
+                if len(hit_layers) == 0 or hit_layers[-1] != z_idx:
+                    hit_layers.append(z_idx)
+            
+            # Check if required layers were hit in the correct order
+            if len(hit_layers) < len(required_layers):
+                return False, f"Layer sequence incomplete. Expected: {required_layers}, Got: {hit_layers}"
+            
+            # Check if the required sequence appears in the hit layers
+            sequence_found = False
+            for i in range(len(hit_layers) - len(required_layers) + 1):
+                if hit_layers[i:i+len(required_layers)] == required_layers:
+                    sequence_found = True
+                    break
+            
+            if not sequence_found:
+                return False, f"Layer sequence mismatch. Expected: {required_layers}, Got: {hit_layers}"
+        
+        # Check chain code similarity
+        is_valid, similarity = self.validate_chain_code(target_signature, similarity_threshold)
+        
+        if not is_valid:
+            return False, f"Chain code similarity too low: {similarity:.2%} (required: {similarity_threshold:.2%})"
+        
+        return True, f"Gesture validated! Chain code similarity: {similarity:.2%}"
     
     def calculate_reference_length_from_pose(self, pose_results) -> Optional[float]:
         """
@@ -870,6 +1073,9 @@ class FaceGrid3D:
                     if not self.voxel_hit_bool[nearest_voxel_idx]:
                         self.voxel_hit_bool[nearest_voxel_idx] = True
                     self.voxel_hit_order.append(nearest_voxel_idx)
+                    
+                    # Calculate chain code direction for trajectory validation
+                    self._update_chain_code(nearest_voxel_idx)
     
     def draw_grid(
         self,
@@ -1048,6 +1254,32 @@ class FaceGrid3D:
             trigger_z_text = f"Trigger Z: {trigger_z_normalized:.3f}"
             cv2.putText(annotated_frame, trigger_z_text, (10, 55),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 2)
+        
+        # Draw chain code debug information (real-time signature generation)
+        chain_code_str = ','.join([str(d) for d in self.current_gesture_chain]) if self.current_gesture_chain else "[]"
+        chain_code_display = f"Chain Code: [{chain_code_str}]"
+        
+        # Draw chain code text at bottom of frame (cyan color for visibility)
+        cv2.putText(
+            annotated_frame,
+            chain_code_display,
+            (10, self.frame_height - 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        cv2.putText(
+            annotated_frame,
+            chain_code_display,
+            (10, self.frame_height - 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA
+        )
         
         return annotated_frame
     

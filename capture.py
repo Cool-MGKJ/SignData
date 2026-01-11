@@ -573,11 +573,23 @@ class HandCapture:
     def start_grid_tracking(self):
         """Start a new grid tracking session (call when Start Capture is pressed)."""
         self.face_grid_tracker.reset_hit_tracking()
+        self.face_grid_tracker.start_chain_capture()
     
     def stop_grid_tracking(self):
         """Stop grid tracking and reset hits (call when Stop Capture is pressed)."""
+        # Stop chain code capture (chain code is retrieved before this is called)
+        self.face_grid_tracker.stop_chain_capture()
         # Reset hit grid after capture stops
         self.face_grid_tracker.reset_hit_tracking()
+    
+    def get_chain_code(self) -> List[int]:
+        """
+        Get the current chain code (sequence of direction indices 0-25).
+        
+        Returns:
+            List of direction indices representing the gesture trajectory
+        """
+        return self.face_grid_tracker.get_chain_code()
     
     def get_hit_grid_vector(self) -> List[int]:
         """

@@ -38,6 +38,7 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_landmarks = None
         self.captured_hit_order = None
+        self.captured_chain_code = None  # Chain code captured during gesture
         self.last_known_landmarks = None  # Track last known hand posture during capture
         
         # Setup callbacks
@@ -91,9 +92,10 @@ class ASLDataCollectionApp:
             # No hands detected at all during capture session
             self.captured_landmarks = []
         
-        # Get the hit order (accumulated during the entire capture session)
+        # Get the hit order and chain code (accumulated during the entire capture session)
         # Do this BEFORE resetting the grid
         self.captured_hit_order = self.capture.get_hit_order()
+        self.captured_chain_code = self.capture.get_chain_code()
         
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
@@ -162,13 +164,15 @@ class ASLDataCollectionApp:
                 hand_info = "none"
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
+        chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
 
-        # Add to dataset (only normalized_points and hit_order as requested)
+        # Add to dataset with chain code
         sample_id = self.dataset.add_sample(
             label=label,
             normalized_points=normalized_points,
             hand=hand_info,
-            hit_order=hit_order
+            hit_order=hit_order,
+            chain_code=chain_code
         )
         
         # Debug output
@@ -190,6 +194,7 @@ class ASLDataCollectionApp:
         self.captured_landmarks = None
         self.captured_frame = None
         self.captured_hit_order = None
+        self.captured_chain_code = None
         
         return True
     
