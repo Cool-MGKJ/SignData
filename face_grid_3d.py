@@ -119,8 +119,8 @@ class FaceGrid3D:
         self.current_trigger_point_2d = None  # (u, v) pixel coordinates
         self.current_trigger_point_3d = None  # (x, y, z) normalized coordinates
         
-        # Layer z-position tracking (captured at capture start)
-        self.layer_z_positions = None  # List of z-positions, one per layer [z_layer0, z_layer1, ...]
+        # Layer z-position tracking (continuously updated relative to face)
+        self.layer_z_positions = None  # List of z-positions relative to face, one per layer [z_layer0, z_layer1, ...]
         self.initial_trigger_z = None  # Initial trigger z-position when capture starts
         self.z_matching_tolerance = 0.25  # Tolerance for z-coordinate matching (increased to allow 2nd layer triggering)
     
@@ -136,20 +136,26 @@ class FaceGrid3D:
         self.layer_z_positions = None
         self.initial_trigger_z = None
     
-    def capture_layer_z_positions(self, trigger_point_z: Optional[float] = None):
+    def update_layer_z_positions_relative_to_face(self):
         """
-        Capture z-positions of each layer at the start of capture.
-        This should be called after the grid is built and when capture starts.
+        Continuously update layer z-positions relative to current face depth.
+        This calculates the z-offset of each layer from the current face/nose depth.
+        The layer z-positions are stored as offsets from face depth, making them
+        always relative to the face position.
         
-        Args:
-            trigger_point_z: Initial trigger point z-position (optional, can be captured later)
+        This should be called whenever the grid is updated (in process_frame).
         """
         if self.voxel_centers is None:
             return
         
-        # Calculate average z-position for each layer
+        # Get current face depth (nose depth)
+        face_depth = self.grid_center_z
+        if face_depth is None or face_depth <= 0:
+            face_depth = 0.5  # Default if not set
+        
+        # Calculate average z-position for each layer, then convert to relative offsets
         voxels_per_layer = self.breadth * self.length
-        layer_z_positions = []
+        layer_z_offsets = []  # Store as offsets from face depth
         
         for z_idx in range(self.depth_layers):
             # Get all voxels in this layer
@@ -160,17 +166,34 @@ class FaceGrid3D:
             layer_voxels = self.voxel_centers[layer_start_idx:layer_end_idx]
             if layer_voxels:
                 avg_z = np.mean([vz for _, _, vz in layer_voxels])
-                layer_z_positions.append(avg_z)
+                # Calculate offset relative to face depth
+                z_offset = avg_z - face_depth
+                layer_z_offsets.append(z_offset)
             else:
-                layer_z_positions.append(0.5)  # Default if no voxels
+                layer_z_offsets.append(0.0)  # Default offset if no voxels
         
-        self.layer_z_positions = layer_z_positions
+        # Store as relative offsets from face depth
+        self.layer_z_positions = layer_z_offsets
+    
+    def capture_layer_z_positions(self, trigger_point_z: Optional[float] = None):
+        """
+        Capture z-positions of each layer (legacy method, calls update_layer_z_positions_relative_to_face).
+        This is kept for backward compatibility.
+        
+        Args:
+            trigger_point_z: Initial trigger point z-position (optional, can be captured later)
+        """
+        # Use the new method that updates relative to face
+        self.update_layer_z_positions_relative_to_face()
         
         # Store initial trigger z if provided
         if trigger_point_z is not None:
             self.initial_trigger_z = trigger_point_z
         
-        print(f"Captured layer z-positions: {self.layer_z_positions}")
+        # Calculate absolute z-positions for debug output
+        face_depth = self.grid_center_z if self.grid_center_z is not None else 0.5
+        absolute_z_positions = [face_depth + offset for offset in self.layer_z_positions]
+        print(f"Updated layer z-positions relative to face (face_depth={face_depth:.3f}): {absolute_z_positions}")
         if self.initial_trigger_z is not None:
             print(f"Initial trigger z: {self.initial_trigger_z}")
     
@@ -471,6 +494,10 @@ class FaceGrid3D:
         self.voxel_centers = voxel_centers
         self.voxel_centers_2d = voxel_centers_2d
         
+        # Continuously update layer z-positions relative to current face depth
+        # This ensures layers are always positioned relative to the face
+        self.update_layer_z_positions_relative_to_face()
+        
         return True
     
     def calculate_palm_trigger_point(self, landmarks: List[Tuple[float, float, float]]) -> Optional[Tuple[float, float, float]]:
@@ -614,44 +641,57 @@ class FaceGrid3D:
             if lz_depth < 0.01:
                 lz_depth = 0.5
             
-            # Capture layer z-positions if not yet captured (first call during capture)
-            # This captures the reference z-positions of all layers at capture start
-            if self.layer_z_positions is None:
-                self.capture_layer_z_positions(trigger_point_z=lz_depth)
-            
-            # Continuously check trigger z against all layer z-positions
-            # Find which layer's z-position matches the current trigger z
+            # Continuously update layer z-positions relative to face (they're updated in process_frame)
+            # Now match based on relative z-offsets from face depth for more robust matching
             matching_layer_idx = None
-            if self.layer_z_positions is not None:
-                min_z_diff = float('inf')
-                for layer_idx, layer_z in enumerate(self.layer_z_positions):
-                    z_diff = abs(lz_depth - layer_z)
-                    # Check if this layer matches (within tolerance)
-                    # Always find the closest layer, not just those within tolerance
-                    if z_diff < min_z_diff:
-                        min_z_diff = z_diff
-                        matching_layer_idx = layer_idx
+            min_z_offset_diff = float('inf')
+            trigger_z_offset = 0.0
+            if self.voxel_centers is not None and self.layer_z_positions is not None:
+                # Get current face depth
+                face_depth = self.grid_center_z if self.grid_center_z is not None else 0.5
                 
-                # Only use the matching layer if it's within tolerance
-                # This ensures we trigger the closest layer if it's close enough
-                if matching_layer_idx is not None and min_z_diff > self.z_matching_tolerance:
+                # Calculate trigger z-offset relative to face depth
+                trigger_z_offset = lz_depth - face_depth
+                
+                voxels_per_layer = self.breadth * self.length
+                
+                # For each layer, calculate z-offset difference (using stored relative offsets)
+                for layer_idx in range(self.depth_layers):
+                    layer_z_offset = self.layer_z_positions[layer_idx]
+                    
+                    # Calculate difference between trigger offset and layer offset
+                    z_offset_diff = abs(trigger_z_offset - layer_z_offset)
+                    
+                    # Find the layer with the smallest z-offset difference
+                    # Invert layer_idx so that layer 1 (far) triggers when hand is closer (smaller z)
+                    # and layer 0 (near) triggers when hand is farther (larger z)
+                    if z_offset_diff < min_z_offset_diff:
+                        min_z_offset_diff = z_offset_diff
+                        # Invert: layer 0 becomes farthest layer, layer 1 becomes nearest layer
+                        matching_layer_idx = self.depth_layers - 1 - layer_idx
+                
+                # Only use the matching layer if z-offset difference is within tolerance
+                if matching_layer_idx is not None and min_z_offset_diff > self.z_matching_tolerance:
                     # Too far from any layer - don't trigger
                     matching_layer_idx = None
-                    # Debug output (comment out in production if too verbose)
-                    # print(f"Trigger z={lz_depth:.3f} too far from all layers (min_diff={min_z_diff:.3f}, tolerance={self.z_matching_tolerance:.3f})")
+                    print(f"Trigger z_offset={trigger_z_offset:.3f} (z={lz_depth:.3f}) too far from all layers (min_offset_diff={min_z_offset_diff:.3f}, tolerance={self.z_matching_tolerance:.3f})")
             
             # If no matching layer found, don't trigger any points
             # This allows the trigger to move between layers continuously
             if matching_layer_idx is None:
                 continue
             
-            # Debug output to verify layer switching (comment out if too verbose)
-            # print(f"Trigger z={lz_depth:.3f}, Layer {matching_layer_idx} z={self.layer_z_positions[matching_layer_idx]:.3f}, diff={abs(lz_depth - self.layer_z_positions[matching_layer_idx]):.3f}")
-            
             # Only check voxels in the matching layer
             voxels_per_layer = self.breadth * self.length
             layer_start_idx = matching_layer_idx * voxels_per_layer
             layer_end_idx = layer_start_idx + voxels_per_layer
+            
+            # Debug output to verify layer switching
+            face_depth = self.grid_center_z if self.grid_center_z is not None else 0.5
+            trigger_z_offset = lz_depth - face_depth
+            layer_z_offset = self.layer_z_positions[matching_layer_idx] if matching_layer_idx is not None and self.layer_z_positions is not None else 0.0
+            layer_z_absolute = face_depth + layer_z_offset
+            print(f"Trigger z_offset={trigger_z_offset:.3f} (z={lz_depth:.3f}), Layer {matching_layer_idx} (voxels {layer_start_idx}-{layer_end_idx-1}) layer_offset={layer_z_offset:.3f} (z={layer_z_absolute:.3f}), offset_diff={min_z_offset_diff:.3f}")
             
             # Find nearest voxel within the matching layer (check x, y only since z already matched)
             min_dist_2d = float('inf')
@@ -745,10 +785,15 @@ class FaceGrid3D:
             base_color = layer_colors[min(z_idx, len(layer_colors) - 1)]
             
             if show_hits and is_hit:
-                # Bright color for hit voxels, larger for nearer layers
-                brightness = 0.8 + layer_depth_factor * 0.2
-                color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
-                color = tuple(int(c * 255) for c in color_vec)
+                # Far layer (z_idx=1) should be red when triggered
+                if z_idx == 1:  # Far layer (layer 1, points 80-159)
+                    color = (0, 0, 255)  # Red in BGR
+                    brightness = 1.0
+                else:
+                    # Bright color for hit voxels in other layers, larger for nearer layers
+                    brightness = 0.8 + layer_depth_factor * 0.2
+                    color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
+                    color = tuple(int(c * 255) for c in color_vec)
                 base_radius = 6
                 radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
             else:
@@ -841,6 +886,16 @@ class FaceGrid3D:
         label_color = (0, 165, 255)
         cv2.putText(annotated_frame, status_text, (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 2)
+        
+        # Display trigger z value at all times
+        if self.current_trigger_point_3d is not None:
+            trigger_z_raw = self.current_trigger_point_3d[2]  # Raw MediaPipe z
+            trigger_z_normalized = np.clip((trigger_z_raw + 0.5) / 1.0, 0.0, 1.0)
+            if trigger_z_normalized < 0.01:
+                trigger_z_normalized = 0.5
+            trigger_z_text = f"Trigger Z: {trigger_z_normalized:.3f}"
+            cv2.putText(annotated_frame, trigger_z_text, (10, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 2)
         
         return annotated_frame
     
