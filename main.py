@@ -106,7 +106,8 @@ class ASLDataCollectionApp:
             normalized_points = normalize_multiple_hands(
                 self.captured_landmarks,
                 self.num_points_per_hand,
-                self.spacing_ratio
+                self.spacing_ratio,
+                preserve_depth=True  # Preserve MediaPipe relative z-depth during capture
             )
             if normalized_points is None:
                 normalized_points = []
@@ -153,7 +154,8 @@ class ASLDataCollectionApp:
             normalized_points = normalize_multiple_hands(
                 self.captured_landmarks,
                 self.num_points_per_hand,
-                self.spacing_ratio
+                self.spacing_ratio,
+                preserve_depth=True  # Preserve MediaPipe relative z-depth during capture
             )
             if normalized_points is None:
                 normalized_points = []

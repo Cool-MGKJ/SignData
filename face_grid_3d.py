@@ -118,6 +118,11 @@ class FaceGrid3D:
         # Store current trigger point for visualization
         self.current_trigger_point_2d = None  # (u, v) pixel coordinates
         self.current_trigger_point_3d = None  # (x, y, z) normalized coordinates
+        
+        # Layer z-position tracking (captured at capture start)
+        self.layer_z_positions = None  # List of z-positions, one per layer [z_layer0, z_layer1, ...]
+        self.initial_trigger_z = None  # Initial trigger z-position when capture starts
+        self.z_matching_tolerance = 0.25  # Tolerance for z-coordinate matching (increased to allow 2nd layer triggering)
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -127,6 +132,47 @@ class FaceGrid3D:
         self.voxel_hit_order = []
         self.current_trigger_point_2d = None
         self.current_trigger_point_3d = None
+        # Reset layer z-positions (will be captured when capture starts)
+        self.layer_z_positions = None
+        self.initial_trigger_z = None
+    
+    def capture_layer_z_positions(self, trigger_point_z: Optional[float] = None):
+        """
+        Capture z-positions of each layer at the start of capture.
+        This should be called after the grid is built and when capture starts.
+        
+        Args:
+            trigger_point_z: Initial trigger point z-position (optional, can be captured later)
+        """
+        if self.voxel_centers is None:
+            return
+        
+        # Calculate average z-position for each layer
+        voxels_per_layer = self.breadth * self.length
+        layer_z_positions = []
+        
+        for z_idx in range(self.depth_layers):
+            # Get all voxels in this layer
+            layer_start_idx = z_idx * voxels_per_layer
+            layer_end_idx = layer_start_idx + voxels_per_layer
+            
+            # Calculate average z-position of voxels in this layer
+            layer_voxels = self.voxel_centers[layer_start_idx:layer_end_idx]
+            if layer_voxels:
+                avg_z = np.mean([vz for _, _, vz in layer_voxels])
+                layer_z_positions.append(avg_z)
+            else:
+                layer_z_positions.append(0.5)  # Default if no voxels
+        
+        self.layer_z_positions = layer_z_positions
+        
+        # Store initial trigger z if provided
+        if trigger_point_z is not None:
+            self.initial_trigger_z = trigger_point_z
+        
+        print(f"Captured layer z-positions: {self.layer_z_positions}")
+        if self.initial_trigger_z is not None:
+            print(f"Initial trigger z: {self.initial_trigger_z}")
     
     def voxel_index(self, x_idx: int, y_idx: int, z_idx: int) -> int:
         """
@@ -568,33 +614,66 @@ class FaceGrid3D:
             if lz_depth < 0.01:
                 lz_depth = 0.5
             
-            # Find nearest voxel across ALL layers based on true 3D distance
-            # This ensures we select the correct layer based on actual depth
-            min_dist_3d = float('inf')
+            # Capture layer z-positions if not yet captured (first call during capture)
+            # This captures the reference z-positions of all layers at capture start
+            if self.layer_z_positions is None:
+                self.capture_layer_z_positions(trigger_point_z=lz_depth)
+            
+            # Continuously check trigger z against all layer z-positions
+            # Find which layer's z-position matches the current trigger z
+            matching_layer_idx = None
+            if self.layer_z_positions is not None:
+                min_z_diff = float('inf')
+                for layer_idx, layer_z in enumerate(self.layer_z_positions):
+                    z_diff = abs(lz_depth - layer_z)
+                    # Check if this layer matches (within tolerance)
+                    # Always find the closest layer, not just those within tolerance
+                    if z_diff < min_z_diff:
+                        min_z_diff = z_diff
+                        matching_layer_idx = layer_idx
+                
+                # Only use the matching layer if it's within tolerance
+                # This ensures we trigger the closest layer if it's close enough
+                if matching_layer_idx is not None and min_z_diff > self.z_matching_tolerance:
+                    # Too far from any layer - don't trigger
+                    matching_layer_idx = None
+                    # Debug output (comment out in production if too verbose)
+                    # print(f"Trigger z={lz_depth:.3f} too far from all layers (min_diff={min_z_diff:.3f}, tolerance={self.z_matching_tolerance:.3f})")
+            
+            # If no matching layer found, don't trigger any points
+            # This allows the trigger to move between layers continuously
+            if matching_layer_idx is None:
+                continue
+            
+            # Debug output to verify layer switching (comment out if too verbose)
+            # print(f"Trigger z={lz_depth:.3f}, Layer {matching_layer_idx} z={self.layer_z_positions[matching_layer_idx]:.3f}, diff={abs(lz_depth - self.layer_z_positions[matching_layer_idx]):.3f}")
+            
+            # Only check voxels in the matching layer
+            voxels_per_layer = self.breadth * self.length
+            layer_start_idx = matching_layer_idx * voxels_per_layer
+            layer_end_idx = layer_start_idx + voxels_per_layer
+            
+            # Find nearest voxel within the matching layer (check x, y only since z already matched)
+            min_dist_2d = float('inf')
             nearest_voxel_idx = -1
             
-            voxels_per_layer = self.breadth * self.length
-            
-            # Check all voxels in all layers to find the closest one in 3D space
-            for voxel_idx in range(len(self.voxel_centers)):
+            for voxel_idx in range(layer_start_idx, layer_end_idx):
                 vx, vy, vz = self.voxel_centers[voxel_idx]
                 
-                # Calculate true 3D Euclidean distance
-                dist_3d = np.sqrt(
+                # Calculate 2D distance (x, y only) since z already matched
+                dist_2d = np.sqrt(
                     (lx_norm - vx) ** 2 +
-                    (ly_norm - vy) ** 2 +
-                    (lz_depth - vz) ** 2
+                    (ly_norm - vy) ** 2
                 )
                 
-                if dist_3d < min_dist_3d:
-                    min_dist_3d = dist_3d
+                if dist_2d < min_dist_2d:
+                    min_dist_2d = dist_2d
                     nearest_voxel_idx = voxel_idx
             
-            # Hit the nearest voxel if within the hit radius (in 3D space)
-            # Use a larger radius for 3D distance to make triggering easier
-            hit_radius_3d = self.hit_radius_norm * 2.0  # Increased scale for 3D distance (was 1.5)
+            # Use 2D hit radius since z already matched
+            hit_radius_2d = self.hit_radius_norm
             
-            if nearest_voxel_idx >= 0 and min_dist_3d <= hit_radius_3d:
+            if nearest_voxel_idx >= 0 and min_dist_2d <= hit_radius_2d:
                 # Only append if this is a different voxel than the last one
                 # This prevents duplicate consecutive entries in the hit order
                 if len(self.voxel_hit_order) == 0 or self.voxel_hit_order[-1] != nearest_voxel_idx:
@@ -751,7 +830,7 @@ class FaceGrid3D:
         
         # Draw status text
         hit_count = np.sum(self.voxel_hit_bool) if self.voxel_hit_bool is not None else 0
-        status_text = f"Depth Mode: OFF (MediaPipe z)"
+        status_text = f"Depth: MediaPipe z (relative)"
         status_text += f" | Hit Voxels: {hit_count} / {self.num_voxels}"
         status_text += f" | Head Yaw: {self.head_yaw_deg:.1f}°"
         status_text += f" | Head Pitch: {self.head_pitch_deg:.1f}°"
@@ -762,10 +841,6 @@ class FaceGrid3D:
         label_color = (0, 165, 255)
         cv2.putText(annotated_frame, status_text, (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 2)
-        
-        # Note: depth is always MediaPipe z (relative)
-        cv2.putText(annotated_frame, "Depth: MediaPipe z (relative)",
-                   (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
         
         return annotated_frame
     

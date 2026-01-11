@@ -417,7 +417,7 @@ class HandCapture:
         Read a frame from the webcam.
         
         Returns:
-            BGR frame as numpy array, or None if failed
+            BGR frame as numpy array (flipped horizontally for mirror effect), or None if failed
         """
         if self.cap is None:
             return None
@@ -425,6 +425,9 @@ class HandCapture:
         ret, frame = self.cap.read()
         if not ret:
             return None
+        
+        # Flip horizontally for mirror effect (common in video chat applications)
+        frame = cv2.flip(frame, 1)
         
         return frame
     
