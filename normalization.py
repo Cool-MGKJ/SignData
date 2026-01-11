@@ -8,6 +8,14 @@ into a consistent 3D space with configurable spacing and point count.
 import numpy as np
 from typing import List, Tuple, Optional
 
+# Optional sklearn dependency for standardization
+try:
+    from sklearn.preprocessing import StandardScaler
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    StandardScaler = None
+
 
 def normalize_landmarks_to_3d_space(
     landmarks: List[Tuple[float, float, float]],
@@ -162,6 +170,166 @@ def normalize_multiple_hands(
         all_points.extend(hand_points)
     
     return all_points
+
+
+def normalize_hand_data(landmarks: List[Tuple[float, float, float]], apply_rotation: bool = True) -> List[Tuple[float, float, float]]:
+    """
+    Normalize hand landmarks to a "Standard Hand" representation.
+    
+    This function implements a normalization pipeline that minimizes intra-class spread
+    by transforming all hands to a standard size and orientation:
+    
+    1. Translation (Zero-Centering): Move the hand so that the Wrist (Index 0) is at (0, 0, 0)
+    2. Scaling (Standard Size): Scale all coordinates by the Euclidean distance from 
+       Wrist (Index 0) to Middle Finger MCP (Index 9)
+    3. Orientation Alignment (Optional): Rotate the hand so that the vector from wrist 
+       to middle finger base points along the positive Y-axis
+    
+    Args:
+        landmarks: List of 21 (x, y, z) tuples from MediaPipe hand landmarks
+        apply_rotation: If True, align rotation so wrist-to-middle-MCP points along +Y axis (default: True)
+    
+    Returns:
+        List of normalized (x, y, z) tuples with wrist at (0, 0, 0) and standard size
+    """
+    if not landmarks or len(landmarks) < 21:
+        # Return zeros if invalid input
+        return [(0.0, 0.0, 0.0)] * 21
+    
+    # Convert to numpy array
+    points = np.array(landmarks, dtype=np.float32)
+    
+    # Step 1: Translation (Zero-Centering)
+    # Move wrist (index 0) to origin (0, 0, 0)
+    wrist = points[0].copy()
+    centered_points = points - wrist
+    
+    # Step 2: Scaling (Standard Size)
+    # Calculate 3D Euclidean distance from Wrist (0) to Middle Finger MCP (9)
+    if len(centered_points) > 9:
+        middle_mcp = centered_points[9]
+        # Use 3D Euclidean distance for scaling (includes x, y, z)
+        scale = np.linalg.norm(middle_mcp)
+        
+        if scale < 1e-6:
+            # Avoid division by zero
+            scale = 1.0
+        
+        # Divide all coordinates by this distance
+        scaled_points = centered_points / scale
+    else:
+        # Fallback if not enough points
+        scaled_points = centered_points
+    
+    # Step 3: Orientation Alignment (Optional)
+    if apply_rotation and len(scaled_points) > 9:
+        # Get the vector from wrist (now at origin) to middle finger MCP
+        wrist_to_middle = scaled_points[9]
+        
+        # Target direction is positive Y-axis: (0, 1, 0)
+        target_direction = np.array([0.0, 1.0, 0.0])
+        
+        # Calculate rotation needed to align wrist-to-middle with +Y axis
+        # Using cross product to find rotation axis and angle
+        current_direction = wrist_to_middle.copy()
+        current_norm = np.linalg.norm(current_direction)
+        target_norm = np.linalg.norm(target_direction)
+        
+        if current_norm > 1e-6:
+            current_direction = current_direction / current_norm
+            
+            # Calculate cross product to find rotation axis
+            cross = np.cross(current_direction, target_direction)
+            cross_norm = np.linalg.norm(cross)
+            
+            # Calculate dot product to find angle
+            dot = np.clip(np.dot(current_direction, target_direction), -1.0, 1.0)
+            angle = np.arccos(dot)
+            
+            # If vectors are already aligned, no rotation needed
+            if cross_norm > 1e-6 and abs(angle) > 1e-6:
+                # Normalize rotation axis
+                axis = cross / cross_norm
+                
+                # Build rotation matrix using Rodrigues' rotation formula
+                # R = I + sin(θ) * K + (1 - cos(θ)) * K²
+                # where K is the cross-product matrix of the axis
+                cos_angle = np.cos(angle)
+                sin_angle = np.sin(angle)
+                
+                # Cross-product matrix K
+                K = np.array([
+                    [0, -axis[2], axis[1]],
+                    [axis[2], 0, -axis[0]],
+                    [-axis[1], axis[0], 0]
+                ])
+                
+                # Rotation matrix
+                I = np.eye(3)
+                R = I + sin_angle * K + (1 - cos_angle) * np.dot(K, K)
+                
+                # Apply rotation to all points
+                rotated_points = np.dot(scaled_points, R.T)
+                scaled_points = rotated_points
+            # If vectors are parallel or anti-parallel, check if we need 180° rotation
+            elif cross_norm <= 1e-6 and dot < -0.9:
+                # Vectors are opposite - rotate 180° around Z-axis
+                R_180 = np.array([
+                    [-1, 0, 0],
+                    [0, -1, 0],
+                    [0, 0, 1]
+                ])
+                scaled_points = np.dot(scaled_points, R_180.T)
+    
+    # Convert back to list of tuples
+    result = [(float(x), float(y), float(z)) for x, y, z in scaled_points]
+    
+    return result
+
+
+def normalize_hand_data_with_rotation(landmarks: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
+    """
+    Convenience wrapper that always applies rotation alignment.
+    """
+    return normalize_hand_data(landmarks, apply_rotation=True)
+
+
+def standardize_features(feature_vector: np.ndarray, scaler: Optional[any] = None, fit: bool = False) -> Tuple[np.ndarray, any]:
+    """
+    Apply StandardScaler to a feature vector (flattened landmarks + chain code).
+    
+    This standardizes the features by removing the mean and scaling to unit variance,
+    which helps with PCA and classification.
+    
+    Args:
+        feature_vector: 1D numpy array of features (flattened landmarks + chain code)
+        scaler: Optional pre-fitted StandardScaler (if None, creates new one)
+        fit: If True, fit the scaler on this data; if False, only transform
+    
+    Returns:
+        Tuple of (standardized_features, scaler)
+    """
+    if not HAS_SKLEARN:
+        # If sklearn not available, return features as-is
+        return feature_vector, None
+    
+    if scaler is None:
+        scaler = StandardScaler()
+    
+    # Reshape to 2D array (samples x features) for sklearn
+    if feature_vector.ndim == 1:
+        feature_vector = feature_vector.reshape(1, -1)
+    
+    if fit:
+        standardized = scaler.fit_transform(feature_vector)
+    else:
+        standardized = scaler.transform(feature_vector)
+    
+    # Return as 1D array if input was 1D
+    if standardized.shape[0] == 1:
+        standardized = standardized.flatten()
+    
+    return standardized, scaler
 
 
 def get_hand_info(landmarks_list: List[dict]) -> str:

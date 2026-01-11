@@ -12,9 +12,10 @@ import os
 from pathlib import Path
 
 from capture import HandCapture
-from normalization import normalize_multiple_hands, get_hand_info
+from normalization import normalize_multiple_hands, get_hand_info, standardize_features
 from dataset_io import DatasetManager
 from ui import ASLDataCollectionUI
+import numpy as np
 
 
 class ASLDataCollectionApp:
@@ -101,17 +102,18 @@ class ASLDataCollectionApp:
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
         
-        # Normalize landmarks (for conventional hand-shape representation)
-        # Handle case where no hands were detected (use captured_landmarks which may be last known)
+        # Landmarks are already normalized by normalize_hand_data() in capture.py
+        # Extract normalized landmarks for display
         if self.captured_landmarks:
             hand_info = get_hand_info(self.captured_landmarks)
-            normalized_points = normalize_multiple_hands(
-                self.captured_landmarks,
-                self.num_points_per_hand,
-                self.spacing_ratio,
-                preserve_depth=True  # Preserve MediaPipe relative z-depth during capture
-            )
-            if normalized_points is None:
+            # Extract normalized landmarks (they're already in Standard Hand format)
+            normalized_points = []
+            for hand_data in self.captured_landmarks:
+                landmarks = hand_data.get('landmarks', [])
+                if len(landmarks) == 21:
+                    # Already normalized by normalize_hand_data() in capture.py
+                    normalized_points.extend(landmarks)
+            if not normalized_points:
                 normalized_points = []
                 hand_info = "none"
         else:
@@ -151,15 +153,20 @@ class ASLDataCollectionApp:
             normalized_points = []
             hand_info = "none"
         else:
-            # Normalize landmarks
+            # Landmarks are already normalized by normalize_hand_data() in capture.py
+            # So we can use them directly (they're already in "Standard Hand" format)
             hand_info = get_hand_info(self.captured_landmarks)
-            normalized_points = normalize_multiple_hands(
-                self.captured_landmarks,
-                self.num_points_per_hand,
-                self.spacing_ratio,
-                preserve_depth=True  # Preserve MediaPipe relative z-depth during capture
-            )
-            if normalized_points is None:
+            
+            # Extract normalized landmarks (they're already in Standard Hand format)
+            # Flatten multiple hands into a single list
+            normalized_points = []
+            for hand_data in self.captured_landmarks:
+                landmarks = hand_data.get('landmarks', [])
+                if len(landmarks) == 21:
+                    # Already normalized by normalize_hand_data() in capture.py
+                    normalized_points.extend(landmarks)
+            
+            if not normalized_points:
                 normalized_points = []
                 hand_info = "none"
         

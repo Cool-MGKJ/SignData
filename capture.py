@@ -13,6 +13,7 @@ import mediapipe as mp
 import numpy as np
 from typing import Optional, List, Tuple
 from face_grid_3d import FaceGrid3D
+from normalization import normalize_hand_data
 
 
 class FaceGridTracker:
@@ -486,18 +487,22 @@ class HandCapture:
                 hand_label = handedness.classification[0].label
                 
                 # Extract 3D coordinates
-                landmarks_3d = []
+                landmarks_3d_raw = []
                 for landmark in hand_landmarks.landmark:
                     # MediaPipe provides normalized coordinates (0-1) and z depth
-                    landmarks_3d.append((
+                    landmarks_3d_raw.append((
                         landmark.x,  # Normalized x (0-1)
                         landmark.y,  # Normalized y (0-1)
                         landmark.z   # Depth (relative, can be negative)
                     ))
                 
+                # Apply "Standard Hand" normalization immediately after MediaPipe detection
+                # This ensures all downstream processing (hit tracking, chain code) uses normalized coordinates
+                landmarks_3d_normalized = normalize_hand_data(landmarks_3d_raw, apply_rotation=True)
+                
                 landmarks_list.append({
                     'hand': hand_label.lower(),  # 'Left' or 'Right'
-                    'landmarks': landmarks_3d
+                    'landmarks': landmarks_3d_normalized  # Use normalized landmarks
                 })
                 
                 # Draw landmarks on frame
