@@ -102,17 +102,19 @@ class ASLDataCollectionApp:
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
         
-        # Landmarks are already normalized by normalize_hand_data() in capture.py
-        # Extract normalized landmarks for display
+        # Apply "Standard Hand" normalization for display
+        # The captured landmarks are in raw MediaPipe format (for grid operations)
+        # Normalize them here for consistent visualization
         if self.captured_landmarks:
             hand_info = get_hand_info(self.captured_landmarks)
-            # Extract normalized landmarks (they're already in Standard Hand format)
+            # Normalize each hand to "Standard Hand" format for display
             normalized_points = []
             for hand_data in self.captured_landmarks:
                 landmarks = hand_data.get('landmarks', [])
                 if len(landmarks) == 21:
-                    # Already normalized by normalize_hand_data() in capture.py
-                    normalized_points.extend(landmarks)
+                    from normalization import normalize_hand_data
+                    normalized = normalize_hand_data(landmarks, apply_rotation=True)
+                    normalized_points.extend(normalized)
             if not normalized_points:
                 normalized_points = []
                 hand_info = "none"
@@ -153,18 +155,19 @@ class ASLDataCollectionApp:
             normalized_points = []
             hand_info = "none"
         else:
-            # Landmarks are already normalized by normalize_hand_data() in capture.py
-            # So we can use them directly (they're already in "Standard Hand" format)
+            # Apply "Standard Hand" normalization when saving to dataset
+            # This ensures consistent representation for PCA/clustering
             hand_info = get_hand_info(self.captured_landmarks)
             
-            # Extract normalized landmarks (they're already in Standard Hand format)
-            # Flatten multiple hands into a single list
+            # Normalize each hand to "Standard Hand" format (wrist at origin, unit scale, rotated)
             normalized_points = []
             for hand_data in self.captured_landmarks:
                 landmarks = hand_data.get('landmarks', [])
                 if len(landmarks) == 21:
-                    # Already normalized by normalize_hand_data() in capture.py
-                    normalized_points.extend(landmarks)
+                    # Apply Standard Hand normalization
+                    from normalization import normalize_hand_data
+                    normalized = normalize_hand_data(landmarks, apply_rotation=True)
+                    normalized_points.extend(normalized)
             
             if not normalized_points:
                 normalized_points = []
