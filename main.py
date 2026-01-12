@@ -3,6 +3,14 @@ Main entry point for ASL Dataset Collection Tool.
 
 This application allows users to collect labelled ASL sign samples
 using MediaPipe hand tracking and a webcam.
+
+Developer Notes:
+- Coordinates the UI (`ASLDataCollectionUI`), capture (`HandCapture`),
+  normalization (`normalize_hand_data`), and dataset storage (`DatasetManager`).
+- Live normalization is applied when saving samples; there is no offline
+  normalization pass in this project.
+- Key runtime flow: initialize capture -> start video loop -> start/stop capture
+  -> save samples to in-memory dataset -> export via UI.
 """
 
 import tkinter as tk

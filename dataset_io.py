@@ -3,6 +3,12 @@ Dataset input/output module.
 
 This module handles storing and saving labelled ASL sign samples
 in both CSV and JSON formats.
+
+Developer Notes:
+- `DatasetManager.add_sample()` stores both numbered point objects and a flattened
+  `points_flat` representation for backwards compatibility with earlier consumers.
+- Samples include `hit_order` and `chain_code` metadata for later clustering and analysis.
+- Export helpers write JSON or CSV suitable for ingestion by ML pipelines.
 """
 
 import json

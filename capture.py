@@ -6,6 +6,14 @@ This module handles:
 - Webcam initialization and frame capture
 - MediaPipe Hands initialization and processing
 - Hand landmark extraction (3D coordinates)
+
+Developer Notes:
+- `HandCapture` wraps camera and MediaPipe Hands, converts detections into
+  the format used by `FaceGrid3D` (per-hand dicts with 'hand' and 'landmarks').
+- `start_grid_tracking()` and `stop_grid_tracking()` control voxel hit/chain
+  capture lifecycle around user-initiated sessions.
+- `FaceGrid3D` performs the voxel mapping and trigger logic; `HandCapture`
+  delegates grid calls to that object.
 """
 
 import cv2

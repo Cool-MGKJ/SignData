@@ -86,16 +86,16 @@ class FaceGrid3D:
     """
     Tracks a face-centered 3D voxel grid using MediaPipe FaceMesh z-depth.
     
-    **2-Layer System (Face Layer + Forward Layer):**
-    - Layer 0 "Face Layer" (z_idx=0, voxels 0-79): Hand at or behind face plane (relative_z >= 0)
-    - Layer 1 "Forward Layer" (z_idx=1, voxels 80-159): Hand extended toward camera (relative_z < 0)
+    **2-Layer System (Camera → Layer 1 → Layer 0 → Face):**
+    - Layer 1 (z_idx=0, voxels 0-79): First layer as hand moves in (relative_z < 0, hand toward camera)
+    - Layer 0 (z_idx=1, voxels 80-159): Second layer as hand approaches face (relative_z >= 0, hand toward face)
     
     **Z-Axis Convention (MediaPipe):**
     - Negative z = closer to camera
     - Positive z = farther from camera
     - relative_z = (raw_z - face_z_reference) / reference_length
-    - negative relative_z → hand extended forward → Layer 1 (near camera)
-    - positive relative_z → hand near/behind face → Layer 0 (near face)
+    - negative relative_z → hand extended forward → Layer 1 (first contact)
+    - positive relative_z → hand approaches face → Layer 0 (second contact)
     
     **Voxel Indexing:**
     - Order: [z, row, col] - z (depth layer) is fastest, then row (y), then col (x)
@@ -934,13 +934,13 @@ class FaceGrid3D:
             
             # Determine layer based on dynamic depth scaling (relative_z)
             if relative_z is not None:
-                # Dynamic Layer Switching:
-                # Layer 0 (Face Layer): relative_z >= 0 (hand at or behind face)
-                # Layer 1 (Forward Layer): relative_z < 0 (hand extended toward camera)
+                # Dynamic Layer Switching based on hand position:
+                # Layer 1 (z_idx=0): relative_z < 0 (hand moving in from camera)
+                # Layer 0 (z_idx=1): relative_z >= 0 (hand approaching face)
                 if relative_z < 0:
-                    matching_layer_idx = 1  # Forward Layer (near camera)
+                    matching_layer_idx = 0  # Layer 1 (first contact, z_idx=0)
                 else:
-                    matching_layer_idx = 0  # Face Layer (near face)
+                    matching_layer_idx = 1  # Layer 0 (second contact, z_idx=1)
             else:
                 # No valid reference data yet; skip this hand
                 continue
@@ -1049,8 +1049,8 @@ class FaceGrid3D:
             base_color = layer_colors[min(z_idx, len(layer_colors) - 1)]
             
             if show_hits and is_hit:
-                # Layer 1 (z_idx=1, near camera) should be bright red when triggered
-                if z_idx == 1:  # Layer 1 (near camera, points 80-159)
+                # Layer 1 (z_idx=0, first contact) should be bright red when triggered
+                if z_idx == 0:  # Layer 1 (first contact, points 0-79)
                     color = (0, 0, 255)  # Bright red in BGR format
                     brightness = 1.0
                     base_radius = 8  # Larger radius for Layer 1 to make it more visible
