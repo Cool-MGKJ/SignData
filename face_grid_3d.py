@@ -10,7 +10,6 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from typing import Optional, List, Tuple, Dict
-from difflib import SequenceMatcher
 
 
 # MediaPipe Hand landmark indices (for path tracking)
@@ -72,20 +71,30 @@ class FaceGrid3D:
     """
     Tracks a face-centered 3D voxel grid using MediaPipe FaceMesh z-depth.
     
-    The grid is a rectangular prism (voxel cube) centered on the nose center point,
-    with spacing based on the distance between the nose and eye centers.
-    The z-coordinate (depth) is derived from MediaPipe landmark z values
-    (normalized to 0-1 range).
+    **2-Layer System (Face Layer + Forward Layer):**
+    - Layer 0 "Face Layer" (z_idx=0, voxels 0-79): Hand at or behind face plane (relative_z >= 0)
+    - Layer 1 "Forward Layer" (z_idx=1, voxels 80-159): Hand extended toward camera (relative_z < 0)
     
-    Voxel indexing order: [z, row, col] - z (depth layer) is fastest, then row (y), then col (x)
-    This means: idx = z * (breadth * length) + row * breadth + col
+    **Z-Axis Convention (MediaPipe):**
+    - Negative z = closer to camera
+    - Positive z = farther from camera
+    - relative_z = (raw_z - face_z_reference) / reference_length
+    - negative relative_z → hand extended forward → Layer 1 (near camera)
+    - positive relative_z → hand near/behind face → Layer 0 (near face)
     
-    Ordering for hit_grid_3d and voxel_paths:
-    - Flattened array order: z-major (layer by layer from near→far)
-    - Within each layer: row-major over Y then X
-    - Example for grid_dims=[8,10,3]: 
-      idx = z_idx * (8 * 10) + y_idx * 8 + x_idx
-      where z_idx ∈ [0,2], y_idx ∈ [0,9], x_idx ∈ [0,7]
+    **Voxel Indexing:**
+    - Order: [z, row, col] - z (depth layer) is fastest, then row (y), then col (x)
+    - Formula: idx = z_idx * (breadth * length) + y_idx * breadth + x_idx
+    - Default: 8 wide × 10 tall × 2 deep = 160 voxels total
+    
+    **Dynamic Head Tracking:**
+    - Grid is centered on nose and rotates with head yaw/pitch
+    - Ensures layers are always positioned relative to user's body
+    
+    **Data Collected Per Sample:**
+    - Normalized hand landmarks (normalized in real-time during capture)
+    - Hit order: sequence of voxel indices touched during gesture
+    - Chain code: directional trajectory (0-25 direction indices)
     """
     
     # MediaPipe Face Mesh landmark indices
@@ -442,78 +451,7 @@ class FaceGrid3D:
         if len(self.current_gesture_chain) == 0 or self.current_gesture_chain[-1] != best_direction_idx:
             self.current_gesture_chain.append(best_direction_idx)
     
-    def validate_chain_code(self, target_signature: List[int], similarity_threshold: float = 0.8) -> Tuple[bool, float]:
-        """
-        Validate the current gesture chain code against a target signature using Levenshtein distance.
-        
-        Args:
-            target_signature: List of direction indices (0-25) representing the expected gesture
-            similarity_threshold: Minimum similarity ratio (0.0 to 1.0) to consider a match (default: 0.8)
-            
-        Returns:
-            Tuple of (is_valid, similarity_ratio)
-            - is_valid: True if similarity >= threshold
-            - similarity_ratio: Similarity score between 0.0 and 1.0
-        """
-        if not self.current_gesture_chain or not target_signature:
-            return False, 0.0
-        
-        # Use SequenceMatcher for similarity (Levenshtein-like distance)
-        # Convert lists to strings for SequenceMatcher
-        current_str = ''.join([str(d) + ',' for d in self.current_gesture_chain])
-        target_str = ''.join([str(d) + ',' for d in target_signature])
-        
-        matcher = SequenceMatcher(None, current_str, target_str)
-        similarity_ratio = matcher.ratio()
-        
-        is_valid = similarity_ratio >= similarity_threshold
-        return is_valid, similarity_ratio
-    
-    def validate_gesture(self, target_signature: List[int], required_layers: Optional[List[int]] = None, 
-                        similarity_threshold: float = 0.8) -> Tuple[bool, str]:
-        """
-        Comprehensive gesture validation combining layer sequence and chain code validation.
-        
-        Args:
-            target_signature: List of direction indices (0-25) representing the expected gesture chain code
-            required_layers: Optional list of layer indices that must be hit (e.g., [1, 0] means layer 1 then layer 0)
-            similarity_threshold: Minimum chain code similarity ratio (default: 0.8)
-            
-        Returns:
-            Tuple of (is_valid, validation_message)
-            - is_valid: True if both layer sequence and chain code are valid
-            - validation_message: Description of validation result
-        """
-        # Check layer sequence if required
-        if required_layers is not None and len(required_layers) > 0:
-            # Extract layers from hit voxels
-            hit_layers = []
-            for voxel_idx in self.voxel_hit_order:
-                z_idx = voxel_idx // (self.breadth * self.length)
-                if len(hit_layers) == 0 or hit_layers[-1] != z_idx:
-                    hit_layers.append(z_idx)
-            
-            # Check if required layers were hit in the correct order
-            if len(hit_layers) < len(required_layers):
-                return False, f"Layer sequence incomplete. Expected: {required_layers}, Got: {hit_layers}"
-            
-            # Check if the required sequence appears in the hit layers
-            sequence_found = False
-            for i in range(len(hit_layers) - len(required_layers) + 1):
-                if hit_layers[i:i+len(required_layers)] == required_layers:
-                    sequence_found = True
-                    break
-            
-            if not sequence_found:
-                return False, f"Layer sequence mismatch. Expected: {required_layers}, Got: {hit_layers}"
-        
-        # Check chain code similarity
-        is_valid, similarity = self.validate_chain_code(target_signature, similarity_threshold)
-        
-        if not is_valid:
-            return False, f"Chain code similarity too low: {similarity:.2%} (required: {similarity_threshold:.2%})"
-        
-        return True, f"Gesture validated! Chain code similarity: {similarity:.2%}"
+
     
     def calculate_reference_length_from_pose(self, pose_results) -> Optional[float]:
         """
@@ -979,72 +917,27 @@ class FaceGrid3D:
             # Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length
             relative_z = self.calculate_relative_z(lz_mp)
             
-            matching_layer_idx = None
-            zone = None
-            
+            # Determine layer based on dynamic depth scaling (relative_z)
             if relative_z is not None:
-                # Dynamic Layer Switching based on Relative Z:
-                # Order: Camera → Layer 1 → Layer 0 → Face
-                # In MediaPipe: smaller Z = closer to camera, larger Z = farther from camera
-                # Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length
-                # - Negative Relative_Z = hand closer to camera than face (extended forward)
-                # - Zero Relative_Z = hand at face plane
-                # - Positive Relative_Z = hand farther from camera than face
-                
-                # Layer 1 (near camera): Relative_Z < 0 (hand extended toward camera)
-                # Layer 0 (near face): Relative_Z >= 0 (hand at or behind face plane)
-                
+                # Dynamic Layer Switching:
+                # Layer 0 (Face Layer): relative_z >= 0 (hand at or behind face)
+                # Layer 1 (Forward Layer): relative_z < 0 (hand extended toward camera)
                 if relative_z < 0:
-                    # Layer 1: Hand is closer to camera than face (extended forward)
-                    matching_layer_idx = 1
-                    zone = 1
-                elif relative_z >= 0:
-                    # Layer 0: Hand is at face plane or farther (near face/body)
-                    matching_layer_idx = 0
-                    zone = 0
+                    matching_layer_idx = 1  # Forward Layer (near camera)
                 else:
-                    # Shouldn't reach here, but just in case
-                    matching_layer_idx = None
-                    zone = None
+                    matching_layer_idx = 0  # Face Layer (near face)
             else:
-                # Fallback: If reference values not available, use raw Z with old logic
-                # This should only happen during initialization
-                lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
-                if lz_depth < 0.01:
-                    lz_depth = 0.5
-                
-                # Fallback zone-based switching (temporary until calibration)
-                if 0.350 <= lz_depth <= 0.500:
-                    matching_layer_idx = 0
-                    zone = 0
-                elif 0.100 <= lz_depth < 0.350:
-                    matching_layer_idx = 1
-                    zone = 1
-                else:
-                    matching_layer_idx = None
-                    zone = None
-                    print(f"[Fallback] Trigger z={lz_depth:.3f} is outside valid zones (calibration needed)")
-            
-            # If no matching layer found, don't trigger any points
-            if matching_layer_idx is None:
+                # No valid reference data yet; skip this hand
                 continue
             
-            # Only check voxels in the matching layer
-            # This ensures that if a hand landmark is in Zone 0, it is mathematically impossible
-            # for it to trigger a voxel in Layer 1, even if they coincide in X/Y coordinates
+            # Select voxels from the matching layer only
             voxels_per_layer = self.breadth * self.length
             layer_start_idx = matching_layer_idx * voxels_per_layer
             layer_end_idx = layer_start_idx + voxels_per_layer
             
-            # Debug output to verify layer switching based on dynamic depth scaling
-            if relative_z is not None:
-                zone_name = "Layer 0 (Near Face)" if zone == 0 else "Layer 1 (Near Camera)"
-                print(f"[Zone {zone}] Relative_Z={relative_z:.3f} (raw_z={lz_mp:.3f}, ref_len={self.reference_length:.4f}, face_z_ref={self.face_z_reference:.3f}) → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
-            else:
-                # Fallback mode
-                lz_depth = np.clip((lz_mp + 0.5) / 1.0, 0.0, 1.0)
-                zone_name = "Far Zone (Near Face)" if zone == 0 else "Near Zone (Near Camera)"
-                print(f"[Zone {zone}] [Fallback] Trigger z={lz_depth:.3f} → Target Layer {matching_layer_idx} (Voxels {layer_start_idx}-{layer_end_idx-1}) - {zone_name}")
+            # Debug output
+            layer_name = "Face Layer" if matching_layer_idx == 0 else "Forward Layer"
+            print(f"[Layer {matching_layer_idx} ({layer_name})] Relative_Z={relative_z:.3f} → Voxels {layer_start_idx}-{layer_end_idx-1}")
             
             # Find nearest voxel within the matching layer (check x, y only since z already matched)
             min_dist_2d = float('inf')
