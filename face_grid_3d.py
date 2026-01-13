@@ -123,7 +123,7 @@ class FaceGrid3D:
         self,
         breadth: int = 8,  # x-axis (width)
         length: int = 10,   # y-axis (height)
-        depth_layers: int = 3,  # z-axis (depth, 3 layers: near, middle, far)
+        depth_layers: int = 2,  # z-axis (depth, 2 layers: face and camera)
         depth_span_factor: float = 2.4,  # How many spacing steps span forward/back
         hit_radius_norm: float = 0.12,  # Hit detection radius in normalized 3D space (increased for better triggering)
         track_landmark_paths: bool = True,
@@ -135,7 +135,7 @@ class FaceGrid3D:
         Args:
             breadth: Number of voxels horizontally (x-axis, default: 8)
             length: Number of voxels vertically (y-axis, default: 10)
-            depth_layers: Number of depth layers (z-axis, default: 3)
+            depth_layers: Number of depth layers (z-axis, default: 2)
             depth_span_factor: Multiplier for depth layer span (default: 2.4)
             hit_radius_norm: Hit detection radius in normalized 3D coordinates (default: 0.06)
             track_landmark_paths: If True, record ordered paths per landmark (default: True)

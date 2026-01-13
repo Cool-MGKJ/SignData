@@ -51,6 +51,19 @@ Primary goals:
 - **Layer 1** (z_idx=1, voxels 80–159): Outer layer closest to camera. Hand extended toward camera yields `relative_z < 0` (red).
 - Voxel indexing (linear): `idx = z_idx * (breadth * length) + y_idx * breadth + x_idx`.
 
+#### Layer Triggering Logic
+Layer selection is determined by **dynamic depth scaling**:
+```
+1. Get hand depth from MediaPipe: lz_mp
+2. Calculate relative depth: relative_z = (lz_mp - face_z_reference) / reference_length
+   • face_z_reference: nose tip Z (your face plane, zero point)
+   • reference_length: shoulder-to-shoulder distance (body size reference)
+3. Compare relative_z to threshold:
+   if relative_z < 0  →  Layer 1 (RED, outer)  - hand extended toward camera
+   if relative_z >= 0 →  Layer 0 (GREEN, inner) - hand at or approaching face
+```
+**Critical**: This is the ONLY valid method for determining layer. The threshold is always at `relative_z = 0` (your face plane).
+
 ### Palm Trigger Point
 - Single point derived per hand per frame.
 - Interpolates between palm base and fingertip average based on finger spread metric.

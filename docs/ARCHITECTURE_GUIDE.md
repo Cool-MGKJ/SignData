@@ -90,27 +90,145 @@ Layer 1 is at nose_depth + 0.24
 
 ## 3. Dynamic Depth Scaling & Layer Triggering
 
-### Hand Position to Layer Mapping
+### Hand Position to Layer Mapping (Complete Algorithm)
 
-#### Reference Values (Set in `update_hit_tracking`)
+#### Step 1: Get Hand Position
 ```python
-reference_length = shoulder_to_shoulder_distance  # Body size reference
-face_z_reference = nose_tip_z_from_mediapipe      # Face plane (zero point)
-
-relative_z = (hand_z_raw - face_z_reference) / reference_length
+lx_norm, ly_norm, lz_mp = trigger_point  # From MediaPipe Hand Landmarks
+# lz_mp is raw MediaPipe z-depth (negative = closer to camera, positive = farther)
 ```
 
-#### Layer Assignment Logic
+#### Step 2: Calculate Reference Values (from current frame)
+```python
+# Reference length: body size (once per frame)
+reference_length = shoulder_to_shoulder_distance  # From MediaPipe Pose
+# Typical range: 0.15 - 0.35 (normalized units)
+
+# Face Z reference: face plane zero-point (once per frame)
+face_z_reference = nose_tip_z_from_mediapipe  # From MediaPipe Face Mesh
+# Typical range: -0.3 to +0.3 (MediaPipe z-depth)
+```
+
+#### Step 3: Transform to Relative Z
+```python
+relative_z = (lz_mp - face_z_reference) / reference_length
+
+Interpretation:
+  • relative_z < 0  : Hand is EXTENDED TOWARD camera
+  • relative_z = 0  : Hand is AT face plane
+  • relative_z > 0  : Hand is APPROACHING face or BEYOND face plane
+```
+
+#### Step 4: Determine Layer (THRESHOLD = 0)
 ```python
 if relative_z < 0:
-    # Hand extended toward camera (moving away from face)
-    matching_layer_idx = 1  # → Layer 1 (RED, outer)
-else:
-    # Hand at or behind face (moving toward face)
-    matching_layer_idx = 0  # → Layer 0 (GREEN, inner)
+    matching_layer_idx = 1  # Layer 1 (OUTER, z_idx=1, voxels 80–159)
+    # Color: RED when hit
+    # Meaning: Hand extended toward camera (first contact)
+else:  # relative_z >= 0
+    matching_layer_idx = 0  # Layer 0 (INNER, z_idx=0, voxels 0–79)
+    # Color: GREEN when hit
+    # Meaning: Hand at or approaching face (second contact)
 ```
 
-**Critical Rule**: This logic is the ONLY valid layer assignment method. Do NOT use z-value ranges, hardcoded thresholds, or other heuristics.
+#### Step 5: Hit Detection (within selected layer only)
+```python
+# Get all voxels in matching_layer_idx
+for voxel in voxels_in_layer:
+    # Calculate 2D distance (x,y only; z already matched)
+    dist_2d = sqrt((lx_norm - voxel_x)^2 + (ly_norm - voxel_y)^2)
+    
+    if dist_2d <= hit_radius_norm:  # typically 0.12
+        → Mark voxel as hit
+        → Add to voxel_hit_order
+        → Update chain code
+```
+
+### Key Invariants (MUST PRESERVE)
+1. **z_idx = layer_number**: `z_idx=0` is Layer 0, `z_idx=1` is Layer 1
+2. **Threshold is 0**: Layer decision point is always at `relative_z = 0`
+3. **Only 2D distance**: Hit detection uses only x,y; z is pre-matched by layer selection
+4. **Single voxel per frame**: Only nearest voxel in selected layer is hit
+5. **No fallback zones**: Never use hardcoded z-ranges or distance-based thresholds
+
+### Reference Length Calculation Priority
+```python
+# Priority 1: Shoulder-to-shoulder (most stable)
+if left_shoulder.visibility > 0.5 and right_shoulder.visibility > 0.5:
+    reference_length = distance_3d(left_shoulder, right_shoulder)
+
+# Priority 2: Wrist-to-elbow (fallback)
+elif wrist.visibility > 0.5 and elbow.visibility > 0.5:
+    reference_length = distance_3d(wrist, elbow)
+
+# Else: No valid reference (skip hand)
+```
+
+### Visual Representation
+```
+                      CAMERA (MediaPipe viewpoint)
+                              ↑
+                              |
+                         relative_z < 0
+                    (LAYER 1 TRIGGERED - RED)
+                              |
+                    ┌─────────────────────┐
+                    │   LAYER 1 (RED)     │
+                    │   z_idx=1           │  ← Hand extended toward camera
+                    │   voxels 80–159     │
+                    └─────────────────────┘
+                              |
+                    ════════════════════  ← relative_z = 0 (THRESHOLD)
+                    Threshold / Face Plane
+                    ════════════════════
+                              |
+                    ┌─────────────────────┐
+                    │   LAYER 0 (GREEN)   │  ← Hand at/approaching face
+                    │   z_idx=0           │
+                    │   voxels 0–79       │
+                    └─────────────────────┘
+                              |
+                         relative_z >= 0
+                    (LAYER 0 TRIGGERED - GREEN)
+                              |
+                       YOUR FACE (Nose)
+```
+
+### Reference Length & Face Z Reference Calculation
+- **Reference Length** (distance-invariance):
+  - Primary: `shoulder_distance = distance_3d(left_shoulder, right_shoulder)` (MediaPipe Pose)
+  - Fallback: `arm_length = distance_3d(wrist, elbow)` (MediaPipe Pose)
+  - Purpose: Scales relative_z calculation to be independent of how close/far you are from camera
+  - Typical range: 0.15–0.35 (normalized units)
+
+- **Face Z Reference** (zero-point calibration):
+  - Value: `nose_z = mediapipe_face_mesh.landmark[4].z` (Nose Tip)
+  - Purpose: Sets the zero-point (face plane) for relative_z calculation
+  - Updates every frame to track head movement
+  - Typical range: -0.3 to +0.3 (MediaPipe z-depth)
+
+### Gesture Flow Example
+```
+User moves hand from camera toward face:
+
+1. Hand far away (relative_z = -0.5):
+   → Layer 1 (RED) voxels trigger
+   → voxel_hit_order: [95, 96, 107, ...]
+
+2. Hand moving closer (relative_z = -0.2):
+   → Still Layer 1 (RED)
+   → voxel_hit_order: [..., 108, 119, ...]
+
+3. Hand crosses face plane (relative_z ≈ 0):
+   → Transition from Layer 1 to Layer 0
+   → Color changes from RED to GREEN
+
+4. Hand near/at face (relative_z = +0.1):
+   → Layer 0 (GREEN) voxels trigger
+   → voxel_hit_order: [..., 45, 34, 23, ...]
+
+Final hit order captures entire path from camera → face
+```
 
 ---
 
