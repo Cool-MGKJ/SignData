@@ -43,11 +43,12 @@ PREDICTION_FONT = ("Arial", 32, "bold")
 STATUS_FONT = ("Arial", 12, "bold")
 
 # Inference configuration
-CONFIDENCE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.5  # Detection fires when confidence >= 0.5
 SMOOTHING_WINDOW = 8  # set to 0 to disable majority-vote smoothing
 MODEL_PATH = Path("models/asl_svm_model.pkl")
 SCALER_PATH = Path("models/scaler.pkl")
 ENCODER_PATH = Path("models/label_encoder.pkl")
+FEATURE_CONFIG_PATH = Path("models/feature_config.pkl")
 
 
 class ASLInferenceApp:
@@ -79,6 +80,8 @@ class ASLInferenceApp:
         self.model = None
         self.scaler = None
         self.label_encoder = None
+        self.max_hit_order_len = 100  # Default, will be loaded from config
+        self.max_chain_code_len = 100  # Default, will be loaded from config
 
         # Smoothing buffer
         self.pred_buffer = deque(maxlen=SMOOTHING_WINDOW) if SMOOTHING_WINDOW > 0 else None
@@ -162,7 +165,7 @@ class ASLInferenceApp:
         self.chain_code_label.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
     def _load_models(self) -> None:
-        """Load model, scaler, and label encoder."""
+        """Load model, scaler, label encoder, and feature config."""
         try:
             print(f"Loading model from: {MODEL_PATH}")
             if not MODEL_PATH.exists():
@@ -181,6 +184,15 @@ class ASLInferenceApp:
                 raise FileNotFoundError(f"Label encoder file not found: {ENCODER_PATH}")
             self.label_encoder = joblib.load(ENCODER_PATH)
             print(f"Label encoder loaded successfully. Classes: {self.label_encoder.classes_}")
+            
+            # Load feature configuration if available
+            if FEATURE_CONFIG_PATH.exists():
+                feature_config = joblib.load(FEATURE_CONFIG_PATH)
+                self.max_hit_order_len = feature_config.get("max_hit_order_len", 100)
+                self.max_chain_code_len = feature_config.get("max_chain_code_len", 100)
+                print(f"Feature config loaded: hit_order_len={self.max_hit_order_len}, chain_code_len={self.max_chain_code_len}")
+            else:
+                print("Warning: Feature config not found, using defaults")
             
         except FileNotFoundError as exc:
             error_msg = f"Model files missing: {exc}"
@@ -252,12 +264,18 @@ class ASLInferenceApp:
                 # Update camera display first (non-blocking)
                 self._update_camera_canvas(annotated)
 
-                # Update grid tracking info
+                # Get hit_order and chain_code if available
+                hit_order = []
+                chain_code = []
                 if self.grid_tracking_active:
+                    hit_order = self.capture.get_hit_order() or []
+                    chain_code = self.capture.get_chain_code() or []
                     self._update_grid_info()
 
                 # Then do prediction (may be slower, but won't block display)
-                prediction, confidence = self._predict_from_landmarks(landmarks_list)
+                prediction, confidence = self._predict_from_landmarks(
+                    landmarks_list, hit_order, chain_code
+                )
                 self._update_prediction_display(prediction, confidence)
         except Exception as e:
             # Log error but don't crash - keep loop running
@@ -265,8 +283,10 @@ class ASLInferenceApp:
 
         self.root.after(30, self._update_loop)
 
-    def _predict_from_landmarks(self, landmarks_list: List[dict]) -> Tuple[str, Optional[float]]:
-        """Predict label from detected landmarks (first hand)."""
+    def _predict_from_landmarks(
+        self, landmarks_list: List[dict], hit_order: List[int] = None, chain_code: List[int] = None
+    ) -> Tuple[str, Optional[float]]:
+        """Predict label from detected landmarks, hit_order, and chain_code."""
         # Check if model is loaded
         if self.model is None:
             return "Model not loaded", None
@@ -294,7 +314,8 @@ class ASLInferenceApp:
                 print(f"Warning: Expected 63 features, got {len(flat)}")
                 return "Feature size mismatch", None
             
-            features = flat.reshape(1, -1)
+            # Extract features: points_flat + hit_order + chain_code
+            features = self._extract_features(flat, hit_order or [], chain_code or [])
 
             # Scale features if scaler available
             if self.scaler is not None:
@@ -336,6 +357,35 @@ class ASLInferenceApp:
             print(f"Prediction error: {e}")
             traceback.print_exc()
             return "Prediction error", None
+
+    def _extract_features(
+        self, points_flat: np.ndarray, hit_order: List[int], chain_code: List[int]
+    ) -> np.ndarray:
+        """
+        Extract features matching training pipeline: points_flat + hit_order + chain_code.
+        
+        Args:
+            points_flat: 63-dimensional flattened hand landmarks
+            hit_order: List of voxel indices hit during tracking
+            chain_code: List of chain code direction indices
+            
+        Returns:
+            Combined feature vector
+        """
+        # Pad or truncate hit_order
+        hit_order_padded = list(hit_order[:self.max_hit_order_len]) + [0] * (self.max_hit_order_len - len(hit_order))
+        
+        # Pad or truncate chain_code
+        chain_code_padded = list(chain_code[:self.max_chain_code_len]) + [0] * (self.max_chain_code_len - len(chain_code))
+        
+        # Combine features
+        combined = np.concatenate([
+            points_flat,
+            np.array(hit_order_padded, dtype=np.float32),
+            np.array(chain_code_padded, dtype=np.float32)
+        ])
+        
+        return combined.reshape(1, -1)
 
     def _smoothed_label(self) -> str:
         """Return majority label from buffer."""

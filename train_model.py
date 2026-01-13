@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any
 
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -42,8 +42,10 @@ MODELS_DIR.mkdir(exist_ok=True)
 
 SVM_MODEL_PATH = MODELS_DIR / "asl_svm_model.pkl"
 RF_MODEL_PATH = MODELS_DIR / "asl_rf_model.pkl"
+GB_MODEL_PATH = MODELS_DIR / "asl_gb_model.pkl"
 SCALER_PATH = MODELS_DIR / "scaler.pkl"
 LABEL_ENCODER_PATH = MODELS_DIR / "label_encoder.pkl"
+FEATURE_CONFIG_PATH = MODELS_DIR / "feature_config.pkl"
 
 DEFAULT_DATASET_PATHS = [
     "data/asl_dataset.json",
@@ -63,7 +65,7 @@ RF_MAX_DEPTH = None
 RF_RANDOM_STATE = RANDOM_STATE
 
 
-def load_datasets(dataset_paths: List[str]) -> Tuple[List[List[float]], List[str]]:
+def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int, int]:
     """
     Load samples from multiple JSON dataset files.
 
@@ -71,9 +73,11 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[List[float]], List[str
         dataset_paths: List of paths to JSON dataset files
 
     Returns:
-        Tuple of (features_list, labels_list) where:
-        - features_list: List of 63-dimensional feature vectors (points_flat)
+        Tuple of (features_list, labels_list, max_hit_order_len, max_chain_code_len) where:
+        - features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code'
         - labels_list: List of string labels
+        - max_hit_order_len: Maximum length of hit_order across all samples
+        - max_chain_code_len: Maximum length of chain_code across all samples
 
     Raises:
         FileNotFoundError: If a dataset file doesn't exist
@@ -81,6 +85,8 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[List[float]], List[str
     """
     all_features = []
     all_labels = []
+    max_hit_order_len = 0
+    max_chain_code_len = 0
 
     for dataset_path in dataset_paths:
         if not os.path.exists(dataset_path):
@@ -134,7 +140,20 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[List[float]], List[str
                     )
                     continue
 
-                all_features.append(points_flat)
+                # Extract hit_order and chain_code
+                hit_order = sample.get("hit_order", [])
+                chain_code = sample.get("chain_code", [])
+                
+                # Track maximum lengths for padding
+                max_hit_order_len = max(max_hit_order_len, len(hit_order))
+                max_chain_code_len = max(max_chain_code_len, len(chain_code))
+
+                # Store features as dict for later padding
+                all_features.append({
+                    "points_flat": points_flat,
+                    "hit_order": hit_order,
+                    "chain_code": chain_code
+                })
                 all_labels.append(label)
 
             print(f"Loaded {len(samples)} samples from {dataset_path}")
@@ -153,28 +172,53 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[List[float]], List[str
         raise ValueError("No valid samples loaded from any dataset file")
 
     print(f"\nTotal samples loaded: {len(all_features)}")
-    return all_features, all_labels
+    print(f"Max hit_order length: {max_hit_order_len}")
+    print(f"Max chain_code length: {max_chain_code_len}")
+    return all_features, all_labels, max_hit_order_len, max_chain_code_len
 
 
 def prepare_features(
-    features_list: List[List[float]], labels_list: List[str]
+    features_list: List[dict], 
+    labels_list: List[str],
+    max_hit_order_len: int,
+    max_chain_code_len: int
 ) -> Tuple[np.ndarray, np.ndarray, StandardScaler, LabelEncoder]:
     """
     Prepare features and labels for training.
 
     Args:
-        features_list: List of 63-dimensional feature vectors
+        features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code'
         labels_list: List of string labels
+        max_hit_order_len: Maximum length for hit_order padding
+        max_chain_code_len: Maximum length for chain_code padding
 
     Returns:
         Tuple of (X_scaled, y_encoded, scaler, label_encoder) where:
-        - X_scaled: Scaled feature matrix (n_samples, 63)
+        - X_scaled: Scaled feature matrix (n_samples, n_features)
         - y_encoded: Encoded label array (n_samples,)
         - scaler: Fitted StandardScaler
         - label_encoder: Fitted LabelEncoder
     """
+    # Pad features to consistent length
+    padded_features = []
+    
+    for feat_dict in features_list:
+        points_flat = feat_dict["points_flat"]
+        hit_order = feat_dict.get("hit_order", [])
+        chain_code = feat_dict.get("chain_code", [])
+        
+        # Pad hit_order
+        hit_order_padded = list(hit_order[:max_hit_order_len]) + [0] * (max_hit_order_len - len(hit_order))
+        
+        # Pad chain_code
+        chain_code_padded = list(chain_code[:max_chain_code_len]) + [0] * (max_chain_code_len - len(chain_code))
+        
+        # Combine: points_flat + hit_order + chain_code
+        combined = list(points_flat) + hit_order_padded + chain_code_padded
+        padded_features.append(combined)
+    
     # Convert to numpy arrays
-    X = np.array(features_list, dtype=np.float32)
+    X = np.array(padded_features, dtype=np.float32)
     y = np.array(labels_list)
 
     # Encode labels
@@ -186,6 +230,10 @@ def prepare_features(
     X_scaled = scaler.fit_transform(X)
 
     print(f"\nFeature matrix shape: {X_scaled.shape}")
+    print(f"  - Points (landmarks): 63")
+    print(f"  - Hit order: {max_hit_order_len}")
+    print(f"  - Chain code: {max_chain_code_len}")
+    print(f"  - Total features: {X_scaled.shape[1]}")
     print(f"Number of classes: {len(label_encoder.classes_)}")
     print(f"Classes: {list(label_encoder.classes_)}")
 
@@ -258,6 +306,34 @@ def train_random_forest(X_train: np.ndarray, y_train: np.ndarray) -> RandomFores
     return rf_model
 
 
+def train_gradient_boosting(X_train: np.ndarray, y_train: np.ndarray) -> GradientBoostingClassifier:
+    """
+    Train a Gradient Boosting classifier.
+
+    Args:
+        X_train: Training features
+        y_train: Training labels
+
+    Returns:
+        Trained GradientBoostingClassifier model
+    """
+    print("\n" + "=" * 60)
+    print("Training Gradient Boosting...")
+    print("=" * 60)
+
+    gb_model = GradientBoostingClassifier(
+        n_estimators=200,
+        learning_rate=0.05,
+        max_depth=3,
+        subsample=0.9,
+        random_state=RANDOM_STATE,
+    )
+    gb_model.fit(X_train, y_train)
+
+    print("Gradient Boosting training completed.")
+    return gb_model
+
+
 def evaluate_model(
     model: Any, X_test: np.ndarray, y_test: np.ndarray, model_name: str, label_encoder: LabelEncoder
 ) -> Dict[str, float]:
@@ -327,8 +403,11 @@ def evaluate_model(
 def save_artifacts(
     svm_model: SVC,
     rf_model: RandomForestClassifier,
+    gb_model: GradientBoostingClassifier,
     scaler: StandardScaler,
     label_encoder: LabelEncoder,
+    max_hit_order_len: int,
+    max_chain_code_len: int,
 ) -> None:
     """
     Save trained models and preprocessing artifacts to disk.
@@ -338,6 +417,8 @@ def save_artifacts(
         rf_model: Trained Random Forest model
         scaler: Fitted StandardScaler
         label_encoder: Fitted LabelEncoder
+        max_hit_order_len: Maximum hit_order length for feature extraction
+        max_chain_code_len: Maximum chain_code length for feature extraction
     """
     print("\n" + "=" * 60)
     print("Saving models and artifacts...")
@@ -358,6 +439,18 @@ def save_artifacts(
     # Save label encoder
     joblib.dump(label_encoder, LABEL_ENCODER_PATH)
     print(f"Saved label encoder to: {LABEL_ENCODER_PATH}")
+
+    # Save Gradient Boosting model
+    joblib.dump(gb_model, GB_MODEL_PATH)
+    print(f"Saved Gradient Boosting model to: {GB_MODEL_PATH}")
+
+    # Save feature configuration
+    feature_config = {
+        "max_hit_order_len": max_hit_order_len,
+        "max_chain_code_len": max_chain_code_len,
+    }
+    joblib.dump(feature_config, FEATURE_CONFIG_PATH)
+    print(f"Saved feature config to: {FEATURE_CONFIG_PATH}")
 
     print("\nAll artifacts saved successfully!")
 
@@ -397,14 +490,16 @@ def main(dataset_paths: List[str] = None) -> None:
 
     # Step 1: Load datasets
     print("\nStep 1: Loading datasets...")
-    features_list, labels_list = load_datasets(dataset_paths)
+    features_list, labels_list, max_hit_order_len, max_chain_code_len = load_datasets(dataset_paths)
 
     # Print class distribution
     print_class_distribution(labels_list)
 
     # Step 2: Prepare features
     print("\nStep 2: Preparing features...")
-    X_scaled, y_encoded, scaler, label_encoder = prepare_features(features_list, labels_list)
+    X_scaled, y_encoded, scaler, label_encoder = prepare_features(
+        features_list, labels_list, max_hit_order_len, max_chain_code_len
+    )
 
     # Step 3: Split data
     print("\nStep 3: Splitting data into training and test sets...")
@@ -435,10 +530,12 @@ def main(dataset_paths: List[str] = None) -> None:
     # Step 4: Train models
     svm_model = train_svm(X_train, y_train)
     rf_model = train_random_forest(X_train, y_train)
+    gb_model = train_gradient_boosting(X_train, y_train)
 
     # Step 5: Evaluate models
     svm_metrics = evaluate_model(svm_model, X_test, y_test, "SVM", label_encoder)
     rf_metrics = evaluate_model(rf_model, X_test, y_test, "Random Forest", label_encoder)
+    gb_metrics = evaluate_model(gb_model, X_test, y_test, "Gradient Boosting", label_encoder)
 
     # Step 6: Compare models
     print("\n" + "=" * 60)
@@ -446,18 +543,28 @@ def main(dataset_paths: List[str] = None) -> None:
     print("=" * 60)
     print(f"\nSVM Accuracy:  {svm_metrics['accuracy']:.4f}")
     print(f"RF Accuracy:   {rf_metrics['accuracy']:.4f}")
+    print(f"GB Accuracy:   {gb_metrics['accuracy']:.4f}")
     print(f"\nSVM F1-score:  {svm_metrics['f1_score']:.4f}")
     print(f"RF F1-score:   {rf_metrics['f1_score']:.4f}")
+    print(f"GB F1-score:   {gb_metrics['f1_score']:.4f}")
 
-    if svm_metrics["accuracy"] >= rf_metrics["accuracy"]:
-        print("\n[+] SVM performs better or equal. SVM will be used as default deployment model.")
-        best_model = "SVM"
-    else:
-        print("\n[+] Random Forest performs better. Consider using RF for deployment.")
-        best_model = "Random Forest"
+    # Pick best by accuracy, then F1, tie-breaker preference: SVM > Gradient Boosting > Random Forest
+    candidates = [
+        ("SVM", svm_metrics),
+        ("Gradient Boosting", gb_metrics),
+        ("Random Forest", rf_metrics),
+    ]
+    preference_order = {"SVM": 0, "Gradient Boosting": 1, "Random Forest": 2}
+    candidates_sorted = sorted(
+        candidates,
+        key=lambda item: (item[1]["accuracy"], item[1]["f1_score"], -preference_order[item[0]]),
+        reverse=True,
+    )
+    best_model = candidates_sorted[0][0]
+    print(f"\n[+] Best performing model: {best_model}")
 
     # Step 7: Save artifacts
-    save_artifacts(svm_model, rf_model, scaler, label_encoder)
+    save_artifacts(svm_model, rf_model, gb_model, scaler, label_encoder, max_hit_order_len, max_chain_code_len)
 
     print("\n" + "=" * 60)
     print("Training pipeline completed successfully!")
@@ -466,6 +573,7 @@ def main(dataset_paths: List[str] = None) -> None:
     print(f"\nSaved files:")
     print(f"  - {SVM_MODEL_PATH}")
     print(f"  - {RF_MODEL_PATH}")
+    print(f"  - {GB_MODEL_PATH}")
     print(f"  - {SCALER_PATH}")
     print(f"  - {LABEL_ENCODER_PATH}")
 
