@@ -126,14 +126,35 @@ class ASLInferenceApp:
     def _load_models(self) -> None:
         """Load model, scaler, and label encoder."""
         try:
+            print(f"Loading model from: {MODEL_PATH}")
+            if not MODEL_PATH.exists():
+                raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
             self.model = joblib.load(MODEL_PATH)
+            print(f"Model loaded successfully. Type: {type(self.model)}")
+            
+            print(f"Loading scaler from: {SCALER_PATH}")
+            if not SCALER_PATH.exists():
+                raise FileNotFoundError(f"Scaler file not found: {SCALER_PATH}")
             self.scaler = joblib.load(SCALER_PATH)
+            print(f"Scaler loaded successfully. Type: {type(self.scaler)}")
+            
+            print(f"Loading label encoder from: {ENCODER_PATH}")
+            if not ENCODER_PATH.exists():
+                raise FileNotFoundError(f"Label encoder file not found: {ENCODER_PATH}")
             self.label_encoder = joblib.load(ENCODER_PATH)
+            print(f"Label encoder loaded successfully. Classes: {self.label_encoder.classes_}")
+            
         except FileNotFoundError as exc:
-            messagebox.showerror("Model files missing", f"Missing file: {exc}")
+            error_msg = f"Model files missing: {exc}"
+            print(error_msg)
+            messagebox.showerror("Model files missing", error_msg)
             self.root.after(100, self.root.destroy)
         except Exception as exc:
-            messagebox.showerror("Model load error", f"Failed to load models: {exc}")
+            error_msg = f"Failed to load models: {exc}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Model load error", error_msg)
             self.root.after(100, self.root.destroy)
 
     def start(self) -> None:
@@ -168,50 +189,69 @@ class ASLInferenceApp:
         if not self.is_running or not self.capture:
             return
 
-        frame = self.capture.read_frame()
-        if frame is not None:
-            annotated, landmarks_list = self.capture.process_frame(
-                frame,
-                track_grid_hits=False,
-                draw_grid=False,
-                show_hits=False,
-            )
+        try:
+            frame = self.capture.read_frame()
+            if frame is not None:
+                annotated, landmarks_list = self.capture.process_frame(
+                    frame,
+                    track_grid_hits=False,
+                    draw_grid=False,
+                    show_hits=False,
+                )
 
-            prediction, confidence = self._predict_from_landmarks(landmarks_list)
-            self._update_prediction_display(prediction, confidence)
+                # Update camera display first (non-blocking)
+                self._update_camera_canvas(annotated)
 
-            self._update_camera_canvas(annotated)
+                # Then do prediction (may be slower, but won't block display)
+                prediction, confidence = self._predict_from_landmarks(landmarks_list)
+                self._update_prediction_display(prediction, confidence)
+        except Exception as e:
+            # Log error but don't crash - keep loop running
+            print(f"Error in update loop: {e}")
 
         self.root.after(30, self._update_loop)
 
     def _predict_from_landmarks(self, landmarks_list: List[dict]) -> Tuple[str, Optional[float]]:
         """Predict label from detected landmarks (first hand)."""
+        # Check if model is loaded
+        if self.model is None:
+            return "Model not loaded", None
+        
         if not landmarks_list:
             if self.pred_buffer:
                 self.pred_buffer.clear()
             return "No hand detected", None
 
-        # Use first detected hand
-        hand = landmarks_list[0]
-        landmarks = hand.get("landmarks", [])
-        if len(landmarks) != 21:
-            return "No hand detected", None
-
-        # Normalize using same training pipeline
-        normalized = normalize_hand_data(landmarks, apply_rotation=True)
-        if not normalized or len(normalized) != 21:
-            return "No hand detected", None
-
-        # Flatten to 63-d vector
-        flat = np.array(normalized, dtype=np.float32).flatten()
-        features = flat.reshape(1, -1)
-
-        # Scale features if scaler available
-        if self.scaler is not None:
-            features = self.scaler.transform(features)
-
-        # Predict label
         try:
+            # Use first detected hand
+            hand = landmarks_list[0]
+            landmarks = hand.get("landmarks", [])
+            if len(landmarks) != 21:
+                return "No hand detected", None
+
+            # Normalize using same training pipeline
+            normalized = normalize_hand_data(landmarks, apply_rotation=True)
+            if not normalized or len(normalized) != 21:
+                return "No hand detected", None
+
+            # Flatten to 63-d vector
+            flat = np.array(normalized, dtype=np.float32).flatten()
+            if len(flat) != 63:
+                print(f"Warning: Expected 63 features, got {len(flat)}")
+                return "Feature size mismatch", None
+            
+            features = flat.reshape(1, -1)
+
+            # Scale features if scaler available
+            if self.scaler is not None:
+                features = self.scaler.transform(features)
+            else:
+                print("Warning: Scaler not loaded")
+
+            # Predict label
+            if self.model is None:
+                return "Model not loaded", None
+                
             proba = None
             if hasattr(self.model, "predict_proba"):
                 proba_vals = self.model.predict_proba(features)
@@ -220,7 +260,11 @@ class ASLInferenceApp:
             else:
                 pred_idx = int(self.model.predict(features)[0])
 
-            label = self.label_encoder.inverse_transform([pred_idx])[0] if self.label_encoder else str(pred_idx)
+            if self.label_encoder is not None:
+                label = self.label_encoder.inverse_transform([pred_idx])[0]
+            else:
+                label = str(pred_idx)
+                print("Warning: Label encoder not loaded")
 
             # Confidence gating
             if proba is not None and proba < CONFIDENCE_THRESHOLD:
@@ -232,7 +276,11 @@ class ASLInferenceApp:
                 label = self._smoothed_label()
 
             return label, proba
-        except Exception:
+        except Exception as e:
+            # Log error with full traceback
+            import traceback
+            print(f"Prediction error: {e}")
+            traceback.print_exc()
             return "Prediction error", None
 
     def _smoothed_label(self) -> str:
@@ -247,17 +295,25 @@ class ASLInferenceApp:
         if frame is None:
             return
 
-        # Resize to fit preview
-        h, w = frame.shape[:2]
-        if w > CAMERA_PREVIEW_WIDTH or h > CAMERA_PREVIEW_HEIGHT:
-            scale = min(CAMERA_PREVIEW_WIDTH / w, CAMERA_PREVIEW_HEIGHT / h)
-            frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        try:
+            # Resize to fit preview
+            h, w = frame.shape[:2]
+            if w > CAMERA_PREVIEW_WIDTH or h > CAMERA_PREVIEW_HEIGHT:
+                scale = min(CAMERA_PREVIEW_WIDTH / w, CAMERA_PREVIEW_HEIGHT / h)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = tk.PhotoImage(master=self.camera_canvas, data=cv2.imencode(".ppm", rgb)[1].tobytes())
-        self.camera_canvas.create_image(0, 0, anchor=tk.NW, image=img)
-        # keep reference
-        self.camera_canvas.image = img
+            # Frame is in BGR from process_frame, convert to RGB for display
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Encode as PPM format for Tkinter
+            img = tk.PhotoImage(master=self.camera_canvas, data=cv2.imencode(".ppm", rgb)[1].tobytes())
+            
+            self.camera_canvas.create_image(0, 0, anchor=tk.NW, image=img)
+            # Keep reference to prevent garbage collection
+            self.camera_canvas.image = img
+        except Exception as e:
+            # Don't crash on display errors
+            print(f"Error updating camera canvas: {e}")
 
     def _update_prediction_display(self, label: str, confidence: Optional[float]) -> None:
         """Update UI with latest prediction."""

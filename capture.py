@@ -470,9 +470,8 @@ class HandCapture:
         # Process the frame
         results = self.hands.process(rgb_frame)
         
-        # Convert back to BGR for drawing
+        # Make frame writeable for drawing
         rgb_frame.flags.writeable = True
-        annotated_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
         
         landmarks_list = []
         
@@ -503,14 +502,17 @@ class HandCapture:
                     'landmarks': landmarks_3d_raw  # Use raw MediaPipe coordinates for grid/hit tracking
                 })
                 
-                # Draw landmarks on frame
+                # Draw landmarks on RGB frame (MediaPipe expects RGB)
                 self.mp_drawing.draw_landmarks(
-                    annotated_frame,
+                    rgb_frame,
                     hand_landmarks,
                     self.mp_hands.HAND_CONNECTIONS,
                     self.mp_drawing_styles.get_default_hand_landmarks_style(),
                     self.mp_drawing_styles.get_default_hand_connections_style()
                 )
+        
+        # Convert RGB to BGR after all drawing is done
+        annotated_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
         
         # Process face for grid (must be called every frame to update grid position)
         if draw_grid:
