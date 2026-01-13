@@ -14,19 +14,19 @@ Workflow:
 3. Provide start/stop controls and safe resource cleanup.
 
 Assumptions:
-- Model files exist at: models/asl_handshape_model.pkl, models/scaler.pkl,
+- Model files exist at: models/asl_svm_model.pkl, models/scaler.pkl,
   models/label_encoder.pkl.
 - Normalization matches training: normalize_hand_data (wrist-centered,
   3D scale, rotation-aligned).
 """
 
-import pickle
 import tkinter as tk
 from collections import Counter, deque
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
+import joblib
 import numpy as np
 from tkinter import messagebox
 
@@ -45,7 +45,7 @@ STATUS_FONT = ("Arial", 12, "bold")
 # Inference configuration
 CONFIDENCE_THRESHOLD = 0.6
 SMOOTHING_WINDOW = 8  # set to 0 to disable majority-vote smoothing
-MODEL_PATH = Path("models/asl_handshape_model.pkl")
+MODEL_PATH = Path("models/asl_svm_model.pkl")
 SCALER_PATH = Path("models/scaler.pkl")
 ENCODER_PATH = Path("models/label_encoder.pkl")
 
@@ -126,12 +126,9 @@ class ASLInferenceApp:
     def _load_models(self) -> None:
         """Load model, scaler, and label encoder."""
         try:
-            with open(MODEL_PATH, "rb") as f:
-                self.model = pickle.load(f)
-            with open(SCALER_PATH, "rb") as f:
-                self.scaler = pickle.load(f)
-            with open(ENCODER_PATH, "rb") as f:
-                self.label_encoder = pickle.load(f)
+            self.model = joblib.load(MODEL_PATH)
+            self.scaler = joblib.load(SCALER_PATH)
+            self.label_encoder = joblib.load(ENCODER_PATH)
         except FileNotFoundError as exc:
             messagebox.showerror("Model files missing", f"Missing file: {exc}")
             self.root.after(100, self.root.destroy)
