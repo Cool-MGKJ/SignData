@@ -86,16 +86,16 @@ class FaceGrid3D:
     """
     Tracks a face-centered 3D voxel grid using MediaPipe FaceMesh z-depth.
     
-    **2-Layer System (Camera → Layer 1 → Layer 0 → Face):**
-    - Layer 1 (z_idx=0, voxels 0-79): First layer as hand moves in (relative_z < 0, hand toward camera)
-    - Layer 0 (z_idx=1, voxels 80-159): Second layer as hand approaches face (relative_z >= 0, hand toward face)
+    **2-Layer System (Face → Layer 0 → Layer 1 → Camera):**
+    - Layer 0 (z_idx=0, voxels 0-79): Closest to face (relative_z >= 0, hand toward/at face) - inner layer
+    - Layer 1 (z_idx=1, voxels 80-159): Closest to camera (relative_z < 0, hand extended toward camera) - outer layer
     
     **Z-Axis Convention (MediaPipe):**
     - Negative z = closer to camera
     - Positive z = farther from camera
     - relative_z = (raw_z - face_z_reference) / reference_length
-    - negative relative_z → hand extended forward → Layer 1 (first contact)
-    - positive relative_z → hand approaches face → Layer 0 (second contact)
+    - positive relative_z → hand at/behind face → Layer 0 (inner layer)
+    - negative relative_z → hand extended forward → Layer 1 (outer layer)
     
     **Voxel Indexing:**
     - Order: [z, row, col] - z (depth layer) is fastest, then row (y), then col (x)
@@ -935,12 +935,12 @@ class FaceGrid3D:
             # Determine layer based on dynamic depth scaling (relative_z)
             if relative_z is not None:
                 # Dynamic Layer Switching based on hand position:
-                # Layer 1 (z_idx=0): relative_z < 0 (hand moving in from camera)
-                # Layer 0 (z_idx=1): relative_z >= 0 (hand approaching face)
+                # Layer 0 (z_idx=0): relative_z >= 0 (hand at/approaching face) - inner layer
+                # Layer 1 (z_idx=1): relative_z < 0 (hand extended toward camera) - outer layer
                 if relative_z < 0:
-                    matching_layer_idx = 0  # Layer 1 (first contact, z_idx=0)
+                    matching_layer_idx = 1  # Layer 1 (outer, z_idx=1, near camera)
                 else:
-                    matching_layer_idx = 1  # Layer 0 (second contact, z_idx=1)
+                    matching_layer_idx = 0  # Layer 0 (inner, z_idx=0, near face)
             else:
                 # No valid reference data yet; skip this hand
                 continue
@@ -1029,13 +1029,14 @@ class FaceGrid3D:
         # Sort by z-depth (farthest first, so nearer voxels overlay)
         voxel_draw_list.sort(key=lambda x: x[3], reverse=True)
         
-        # Colors for different depth layers (near to far) - more distinguishable
+        # Colors for different depth layers
+        # Layer 0 (z_idx=0, face): green when triggered, dim green normally
+        # Layer 1 (z_idx=1, camera): red when triggered, dim red normally
         layer_colors = [
-            np.array((0, 255, 0)),      # Near layer - bright green
-            np.array((0, 255, 255)),    # Middle layer - bright yellow
-            np.array((255, 0, 255)),    # Far layer - bright magenta
+            np.array((0, 255, 0)),      # Layer 0 (z_idx=0, face) - green in BGR
+            np.array((0, 0, 255)),      # Layer 1 (z_idx=1, camera) - red in BGR
         ]
-        # Extend colors if more than 3 layers
+        # Extend colors if more than 2 layers
         while len(layer_colors) < self.depth_layers:
             layer_colors.append(np.array((255, 255, 0)))  # Default bright cyan for extra layers
 
@@ -1049,21 +1050,19 @@ class FaceGrid3D:
             base_color = layer_colors[min(z_idx, len(layer_colors) - 1)]
             
             if show_hits and is_hit:
-                # Layer 1 (z_idx=0, first contact) should be bright red when triggered
-                if z_idx == 0:  # Layer 1 (first contact, points 0-79)
+                # Layer 0 (z_idx=0, face) bright green; Layer 1 (z_idx=1, camera) bright red when triggered
+                if z_idx == 0:  # Layer 0 (face, points 0-79)
+                    color = (0, 255, 0)  # Bright green in BGR format
+                    brightness = 1.0
+                    base_radius = 8  # Larger radius for Layer 0 to make it more visible
+                    radius = max(6, int(base_radius * (0.9 + layer_depth_factor * 0.1)))
+                else:  # Layer 1 (camera, points 80-159)
                     color = (0, 0, 255)  # Bright red in BGR format
                     brightness = 1.0
-                    base_radius = 8  # Larger radius for Layer 1 to make it more visible
+                    base_radius = 8  # Larger radius for Layer 1 when triggered
                     radius = max(6, int(base_radius * (0.9 + layer_depth_factor * 0.1)))
-                else:
-                    # Bright color for hit voxels in other layers, larger for nearer layers
-                    brightness = 0.8 + layer_depth_factor * 0.2
-                    color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
-                    color = tuple(int(c * 255) for c in color_vec)
-                    base_radius = 6
-                    radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
             else:
-                # Dimmer color for unhit voxels, smaller for farther layers
+                # Dimmer color for unhit voxels: dim red for Layer 1, dim green for Layer 0
                 brightness = 0.4 + layer_depth_factor * 0.3
                 color_vec = base_color * brightness / 255.0
                 color = tuple(int(c * 255) for c in np.clip(color_vec, 0, 1))

@@ -46,9 +46,9 @@ Primary goals:
 
 ### 2-Layer Grid
 - Grid size: default 8 (width) × 10 (height) × 2 (depth) = 160 voxels
-- Hierarchy: **Camera → Layer 1 → Layer 0 → Face**
-- **Layer 1** (z_idx=0, voxels 0–79): First layer as hand moves in. Hand extended toward camera yields `relative_z < 0`.
-- **Layer 0** (z_idx=1, voxels 80–159): Second layer as hand approaches face. Hand at or behind face yields `relative_z >= 0`.
+- Hierarchy: **Face → Layer 0 → Layer 1 → Camera**
+- **Layer 0** (z_idx=0, voxels 0–79): Inner layer closest to face. Hand at or behind face yields `relative_z >= 0` (green).
+- **Layer 1** (z_idx=1, voxels 80–159): Outer layer closest to camera. Hand extended toward camera yields `relative_z < 0` (red).
 - Voxel indexing (linear): `idx = z_idx * (breadth * length) + y_idx * breadth + x_idx`.
 
 ### Palm Trigger Point

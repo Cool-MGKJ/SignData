@@ -21,7 +21,9 @@
 - Real-time hand landmark detection (MediaPipe Hands, 21 points per hand)
 - Basic landmark normalization
 - Simple dataset collection and export
-- Face-centered voxel grid (8×10×3 = 240 voxels)
+- Face-centered voxel grid (8×10×2 = 160 voxels) with 2-layer depth system
+  - Layer 0 (z_idx=0): Inner layer at face (green when triggered)
+  - Layer 1 (z_idx=1): Outer layer at camera (red when triggered)
 - Hit tracking during capture sessions
 
 ---
@@ -89,10 +91,10 @@
 - **Issue**: Layer 1 not triggering correctly
 - **Z-matching tolerance**: Adjustable (default: 0.25)
 
-### Zone-Based Layer Switching (Hardcoded)
-- **Zone 0 (Far/Near Face)**: z ∈ [0.350, 0.500] → Layer 0 (voxels 0-79)
-- **Zone 1 (Near/Camera)**: z ∈ [0.100, 0.350] → Layer 1 (voxels 80-159)
+### Zone-Based Layer Switching (Deprecated Hardcoded)
+- **Old system**: Hardcoded z-value ranges
 - **Problem**: Distance-dependent, not adaptive to user size/distance
+- **Status**: REMOVED - replaced with dynamic depth scaling
 
 ### Dynamic Depth Scaling System (Current)
 - **Reference Length**: Body-relative measurement
@@ -101,16 +103,22 @@
   - Purpose: Make system distance-invariant
 - **Face Z Reference**: Nose tip Z-value as zero plane
 - **Relative Z Calculation**: `Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length`
-- **Zone Definitions**:
-  - **Layer 1 (Near Camera)**: `Relative_Z < 0` (hand extended toward camera)
-  - **Layer 0 (Near Face)**: `Relative_Z >= 0` (hand at face plane or farther)
+- **Zone Definitions** (Face-First Hierarchy):
+  - **Layer 0 (Inner/Face)** (z_idx=0, voxels 0-79): `Relative_Z >= 0` (hand at/approaching face) - **green when triggered**
+  - **Layer 1 (Outer/Camera)** (z_idx=1, voxels 80-159): `Relative_Z < 0` (hand extended toward camera) - **red when triggered**
 - **Implementation**: MediaPipe Pose integration for shoulder/elbow detection
 - **Status**: Current system, adaptive to user body size
+- **Gesture Flow**: Hand enters Layer 1 first (outer), then Layer 0 (inner) as it approaches face
 
-### Layer Triggering Inversion
-- **Initial Behavior**: Layer 1 triggered when hand moved away from camera
-- **Desired Behavior**: Layer 1 triggers when hand moves closer to camera
-- **Solution**: Inverted layer matching logic + relative Z zone system
+### Layer Triggering & Naming Convention
+- **Naming Strategy**: Face-First (z_idx alignment with layer names)
+  - z_idx=0 → Layer 0 (at face)
+  - z_idx=1 → Layer 1 (at camera)
+- **Benefits**: Self-documenting code, reduces bugs, clearer indexing
+- **Gesture Progression**: Hand moves through Layer 1 (outer) before Layer 0 (inner)
+- **Color Coding**:
+  - Layer 0 (z_idx=0, face): Green voxels (bright green when triggered)
+  - Layer 1 (z_idx=1, camera): Red voxels (bright red when triggered)
 
 ---
 
@@ -143,10 +151,10 @@
 
 ### Grid Visualization Evolution
 - **Initial**: Basic grid point display (gray for unhit, green for hit)
-- **Layer Differentiation**:
-  - Layer 1 hits: Bright red `(0, 0, 255)` with radius 8
-  - Layer 0 hits: Green (standard)
-- **Path Visualization**: Magenta path lines (thickness reduced from 3→1, radius 3→2)
+- **Current Layer Coloring**:
+  - Layer 0 (z_idx=0, face): Bright green when hit, dim green when unhit
+  - Layer 1 (z_idx=1, camera): Bright red when hit, dim red when unhit
+- **Path Visualization**: Magenta path lines (thickness 1, point radius 2)
 
 ### Trigger Point Display
 - **Visualization**: Large red circle with white outline
