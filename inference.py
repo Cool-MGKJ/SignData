@@ -65,11 +65,15 @@ class ASLInferenceApp:
         self.confidence_label = None
         self.start_button = None
         self.stop_button = None
+        self.hit_count_label = None
+        self.chain_code_label = None
+        self.voxel_path_label = None
 
         # Capture / inference state
         self.capture = None
         self.is_running = False
         self.latest_frame: Optional[np.ndarray] = None
+        self.grid_tracking_active = False
 
         # Model artifacts
         self.model = None
@@ -104,6 +108,14 @@ class ASLInferenceApp:
         self.status_label = tk.Label(left_frame, text="Status: Camera OFF", font=STATUS_FONT, fg="red")
         self.status_label.pack(pady=(10, 0))
 
+        # Hit count display (160-point two-layer grid)
+        self.hit_count_label = tk.Label(
+            left_frame,
+            text="Hit Count: 0/160",
+            font=("Arial", 9)
+        )
+        self.hit_count_label.pack(pady=(5, 0))
+
         # Controls
         controls = tk.Frame(left_frame)
         controls.pack(pady=(10, 0))
@@ -121,7 +133,33 @@ class ASLInferenceApp:
         self.prediction_label.pack(pady=(0, 10))
 
         self.confidence_label = tk.Label(right_frame, text="Confidence: –", font=("Arial", 14))
-        self.confidence_label.pack()
+        self.confidence_label.pack(pady=(0, 20))
+
+        # Voxel path and chain code display
+        info_frame = tk.LabelFrame(right_frame, text="Grid Tracking Info", font=("Arial", 12, "bold"))
+        info_frame.pack(pady=(10, 0), padx=10, fill=tk.BOTH, expand=True)
+
+        # Voxel path display
+        tk.Label(info_frame, text="Voxel Path (Hit Order):", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(5, 2))
+        self.voxel_path_label = tk.Label(
+            info_frame,
+            text="[]",
+            font=("Courier", 9),
+            justify=tk.LEFT,
+            wraplength=400
+        )
+        self.voxel_path_label.pack(anchor=tk.W, padx=10, pady=(0, 10))
+
+        # Chain code display
+        tk.Label(info_frame, text="Chain Code:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(5, 2))
+        self.chain_code_label = tk.Label(
+            info_frame,
+            text="[]",
+            font=("Courier", 9),
+            justify=tk.LEFT,
+            wraplength=400
+        )
+        self.chain_code_label.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
     def _load_models(self) -> None:
         """Load model, scaler, and label encoder."""
@@ -168,6 +206,10 @@ class ASLInferenceApp:
             self.capture = None
             return
 
+        # Start grid tracking for voxel path and chain code
+        self.capture.start_grid_tracking()
+        self.grid_tracking_active = True
+
         self.is_running = True
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
@@ -177,9 +219,16 @@ class ASLInferenceApp:
     def stop(self) -> None:
         """Stop inference and release resources."""
         self.is_running = False
+        if self.capture and self.grid_tracking_active:
+            self.capture.stop_grid_tracking()
+            self.grid_tracking_active = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.status_label.config(text="Status: Camera OFF", fg="red")
+        # Reset displays
+        self.hit_count_label.config(text="Hit Count: 0/160")
+        self.voxel_path_label.config(text="[]")
+        self.chain_code_label.config(text="[]")
         if self.capture:
             self.capture.release()
             self.capture = None
@@ -192,15 +241,20 @@ class ASLInferenceApp:
         try:
             frame = self.capture.read_frame()
             if frame is not None:
+                # Process frame with grid visualization enabled
                 annotated, landmarks_list = self.capture.process_frame(
                     frame,
-                    track_grid_hits=False,
-                    draw_grid=False,
-                    show_hits=False,
+                    track_grid_hits=self.grid_tracking_active,
+                    draw_grid=True,  # Always show the 160-point two-layer grid
+                    show_hits=True,  # Show hit highlights
                 )
 
                 # Update camera display first (non-blocking)
                 self._update_camera_canvas(annotated)
+
+                # Update grid tracking info
+                if self.grid_tracking_active:
+                    self._update_grid_info()
 
                 # Then do prediction (may be slower, but won't block display)
                 prediction, confidence = self._predict_from_landmarks(landmarks_list)
@@ -314,6 +368,48 @@ class ASLInferenceApp:
         except Exception as e:
             # Don't crash on display errors
             print(f"Error updating camera canvas: {e}")
+
+    def _update_grid_info(self) -> None:
+        """Update grid tracking information display."""
+        if not self.capture:
+            return
+
+        try:
+            # Get hit order (voxel path)
+            hit_order = self.capture.get_hit_order() or []
+            num_hits = len(hit_order)
+            
+            # Get total grid points (should be 160 for 8x10x2 grid)
+            total_grid_points = self.capture.get_num_grid_points()
+            
+            # Update hit count
+            self.hit_count_label.config(text=f"Hit Count: {num_hits}/{total_grid_points}")
+            
+            # Update voxel path display (show first 50 for readability)
+            if hit_order:
+                display_path = hit_order[:50] if len(hit_order) > 50 else hit_order
+                path_text = str(display_path)
+                if len(hit_order) > 50:
+                    path_text += f" ... (+{len(hit_order) - 50} more)"
+                self.voxel_path_label.config(text=path_text)
+            else:
+                self.voxel_path_label.config(text="[]")
+            
+            # Get chain code
+            chain_code = self.capture.get_chain_code() or []
+            
+            # Update chain code display (show first 50 for readability)
+            if chain_code:
+                display_chain = chain_code[:50] if len(chain_code) > 50 else chain_code
+                chain_text = str(display_chain)
+                if len(chain_code) > 50:
+                    chain_text += f" ... (+{len(chain_code) - 50} more)"
+                self.chain_code_label.config(text=chain_text)
+            else:
+                self.chain_code_label.config(text="[]")
+        except Exception as e:
+            # Don't crash on grid info errors
+            print(f"Error updating grid info: {e}")
 
     def _update_prediction_display(self, label: str, confidence: Optional[float]) -> None:
         """Update UI with latest prediction."""
