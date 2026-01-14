@@ -73,6 +73,15 @@ class DatasetManager:
         left_points = format_points(points_left)
         right_points = format_points(points_right)
         
+        # Format trigger points as well
+        def format_trigger_points(trigger_list):
+            if trigger_list is None:
+                return []
+            return [{'x': point[0], 'y': point[1], 'z': point[2]} for point in trigger_list]
+        
+        trigger_points_left = format_trigger_points(trigger_point_left)
+        trigger_points_right = format_trigger_points(trigger_point_right)
+        
         sample = {
             'id': sample_id,
             'label': label,
@@ -83,11 +92,13 @@ class DatasetManager:
             'palm_angles_left': palm_angles_left if palm_angles_left is not None else [],
             'palm_angles_right': palm_angles_right if palm_angles_right is not None else [],
             'trigger_distance_left': trigger_distance_left if trigger_distance_left is not None else [],
-            'trigger_distance_right': trigger_distance_right if trigger_distance_right is not None else []
+            'trigger_distance_right': trigger_distance_right if trigger_distance_right is not None else [],
+            'trigger_point_left': trigger_points_left,
+            'trigger_point_right': trigger_points_right
         }
 
         self.samples.append(sample)
-        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points_L={len(left_points)}, Points_R={len(right_points)}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}")
+        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points_L={len(left_points)}, Points_R={len(right_points)}, Hit Order={len(sample['hit_order'])}, Trigger Points L={len(trigger_points_left)}, R={len(trigger_points_right)}")
         return sample_id
     
     def get_all_samples(self) -> List[dict]:

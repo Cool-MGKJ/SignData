@@ -52,6 +52,8 @@ class ASLDataCollectionApp:
         self.captured_palm_angles_right = None  # Palm angles for right hand
         self.captured_trigger_distance_left = None  # Trigger distances for left hand
         self.captured_trigger_distance_right = None  # Trigger distances for right hand
+        self.captured_trigger_point_left = None  # Trigger points for left hand
+        self.captured_trigger_point_right = None  # Trigger points for right hand
         self.last_known_landmarks = None  # Track last known hand posture during capture
         
         # Setup callbacks
@@ -115,6 +117,8 @@ class ASLDataCollectionApp:
         self.captured_palm_angles_right = self.capture.get_palm_angles_right()
         self.captured_trigger_distance_left = self.capture.get_trigger_distance_left()
         self.captured_trigger_distance_right = self.capture.get_trigger_distance_right()
+        self.captured_trigger_point_left = self.capture.get_trigger_point_left()
+        self.captured_trigger_point_right = self.capture.get_trigger_point_right()
         
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
@@ -210,6 +214,8 @@ class ASLDataCollectionApp:
         palm_angles_right = self.captured_palm_angles_right if self.captured_palm_angles_right is not None else []
         trigger_distance_left = self.captured_trigger_distance_left if self.captured_trigger_distance_left is not None else []
         trigger_distance_right = self.captured_trigger_distance_right if self.captured_trigger_distance_right is not None else []
+        trigger_point_left = self.captured_trigger_point_left if self.captured_trigger_point_left is not None else []
+        trigger_point_right = self.captured_trigger_point_right if self.captured_trigger_point_right is not None else []
 
         # Add to dataset with separated left/right points
         sample_id = self.dataset.add_sample(
@@ -221,7 +227,9 @@ class ASLDataCollectionApp:
             palm_angles_left=palm_angles_left,
             palm_angles_right=palm_angles_right,
             trigger_distance_left=trigger_distance_left,
-            trigger_distance_right=trigger_distance_right
+            trigger_distance_right=trigger_distance_right,
+            trigger_point_left=trigger_point_left,
+            trigger_point_right=trigger_point_right
         )
         
         # Debug output
@@ -249,6 +257,8 @@ class ASLDataCollectionApp:
         self.captured_palm_angles_right = None
         self.captured_trigger_distance_left = None
         self.captured_trigger_distance_right = None
+        self.captured_trigger_point_left = None
+        self.captured_trigger_point_right = None
         
         return True
     
