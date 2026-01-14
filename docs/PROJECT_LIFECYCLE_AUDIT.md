@@ -21,9 +21,7 @@
 - Real-time hand landmark detection (MediaPipe Hands, 21 points per hand)
 - Basic landmark normalization
 - Simple dataset collection and export
-- Face-centered voxel grid (8×10×2 = **160 voxels**) with 2-layer depth system
-  - Layer 0 (z_idx=0, voxels 0–79): Inner layer at face (green when triggered)
-  - Layer 1 (z_idx=1, voxels 80–159): Outer layer at camera (red when triggered)
+- Face-centered voxel grid (8×10×3 = 240 voxels)
 - Hit tracking during capture sessions
 
 ---
@@ -91,10 +89,10 @@
 - **Issue**: Layer 1 not triggering correctly
 - **Z-matching tolerance**: Adjustable (default: 0.25)
 
-### Zone-Based Layer Switching (Deprecated Hardcoded)
-- **Old system**: Hardcoded z-value ranges
+### Zone-Based Layer Switching (Hardcoded)
+- **Zone 0 (Far/Near Face)**: z ∈ [0.350, 0.500] → Layer 0 (voxels 0-79)
+- **Zone 1 (Near/Camera)**: z ∈ [0.100, 0.350] → Layer 1 (voxels 80-159)
 - **Problem**: Distance-dependent, not adaptive to user size/distance
-- **Status**: REMOVED - replaced with dynamic depth scaling
 
 ### Dynamic Depth Scaling System (Current)
 - **Reference Length**: Body-relative measurement
@@ -103,34 +101,16 @@
   - Purpose: Make system distance-invariant
 - **Face Z Reference**: Nose tip Z-value as zero plane
 - **Relative Z Calculation**: `Relative_Z = (Raw_Z - Face_Z_Reference) / Reference_Length`
-- **Layer Triggering Algorithm** (Formalized in Phase 9):
-  ```
-  if relative_z < 0:
-      matching_layer_idx = 1  # Layer 1 (outer, z_idx=1, near camera) - RED
-  else:
-      matching_layer_idx = 0  # Layer 0 (inner, z_idx=0, near face) - GREEN
-  ```
-- **Zone Definitions** (Face-First Hierarchy):
-  - **Layer 0 (Inner/Face)** (z_idx=0, voxels 0–79): `Relative_Z >= 0` (hand at/approaching face) - **green when triggered**
-  - **Layer 1 (Outer/Camera)** (z_idx=1, voxels 80–159): `Relative_Z < 0` (hand extended toward camera) - **red when triggered**
+- **Zone Definitions**:
+  - **Layer 1 (Near Camera)**: `Relative_Z < 0` (hand extended toward camera)
+  - **Layer 0 (Near Face)**: `Relative_Z >= 0` (hand at face plane or farther)
 - **Implementation**: MediaPipe Pose integration for shoulder/elbow detection
 - **Status**: Current system, adaptive to user body size
-- **Gesture Flow**: Hand enters Layer 1 first (outer), then Layer 0 (inner) as it approaches face
-- **Key Design Properties**:
-  - **Distance-invariant**: Works regardless of camera distance
-  - **Adaptive**: Scales based on body size automatically
-  - **Single threshold**: Predictable behavior with no fallback zones
-  - **Reliable**: Based on body metrics, not hardcoded distances
 
-### Layer Triggering & Naming Convention
-- **Naming Strategy**: Face-First (z_idx alignment with layer names)
-  - z_idx=0 → Layer 0 (at face)
-  - z_idx=1 → Layer 1 (at camera)
-- **Benefits**: Self-documenting code, reduces bugs, clearer indexing
-- **Gesture Progression**: Hand moves through Layer 1 (outer) before Layer 0 (inner)
-- **Color Coding**:
-  - Layer 0 (z_idx=0, face): Green voxels (bright green when triggered)
-  - Layer 1 (z_idx=1, camera): Red voxels (bright red when triggered)
+### Layer Triggering Inversion
+- **Initial Behavior**: Layer 1 triggered when hand moved away from camera
+- **Desired Behavior**: Layer 1 triggers when hand moves closer to camera
+- **Solution**: Inverted layer matching logic + relative Z zone system
 
 ---
 
@@ -163,10 +143,10 @@
 
 ### Grid Visualization Evolution
 - **Initial**: Basic grid point display (gray for unhit, green for hit)
-- **Current Layer Coloring**:
-  - Layer 0 (z_idx=0, face): Bright green when hit, dim green when unhit
-  - Layer 1 (z_idx=1, camera): Bright red when hit, dim red when unhit
-- **Path Visualization**: Magenta path lines (thickness 1, point radius 2)
+- **Layer Differentiation**:
+  - Layer 1 hits: Bright red `(0, 0, 255)` with radius 8
+  - Layer 0 hits: Green (standard)
+- **Path Visualization**: Magenta path lines (thickness reduced from 3→1, radius 3→2)
 
 ### Trigger Point Display
 - **Visualization**: Large red circle with white outline
@@ -226,110 +206,44 @@
 
 ---
 
-## Phase 9: Documentation Standardization & Layer Triggering Formalization (Latest)
+## Technical Debt & Legacy Code
 
-### Architecture Guide Creation
-- **File**: `docs/ARCHITECTURE_GUIDE.md` (NEW)
-- **Purpose**: Comprehensive reference for all future code updates
-- **Contents**:
-  - Core layer system definition (Face-First naming)
-  - Depth layer spacing calculation formula
-  - Complete layer triggering algorithm with 5-step process
-  - Dynamic depth scaling details
-  - Chain code system (26-directional)
-  - Hit detection algorithm
-  - Data structures overview
-  - Maintenance guidelines and testing checklist
-- **Key Requirement**: Must be referenced for all future updates
+### Deprecated Methods
+1. **Centroid-based normalization**: `preserve_depth=False` in `normalize_landmarks_to_3d_space()`
+2. **Hardcoded z-zones**: Replaced by dynamic depth scaling
+3. **MiDaS depth estimation**: Completely removed from codebase
 
-### Documentation Consistency Pass
-- **Files Updated**:
-  1. `PROJECT_DOCUMENTATION.md`: Added "Layer Triggering Logic" subsection
-  2. `docs/ARCHITECTURE_GUIDE.md`: Created with comprehensive system documentation
-  3. `docs/API_REFERENCE.md`: Added "Layer Triggering Logic" section
-  4. `docs/developer_guide.md`: Updated with cross-references
-  5. `PROJECT_LIFECYCLE_AUDIT.md`: Updated with recent changes (this file)
-
-### Consistency Fixes Applied
-- **Voxel Count**: Unified to 160 (8×10×2) across all docs
-- **Depth Layers**: Corrected from 3 to 2 across all docs
-- **Layer Naming**: Face-First convention (Layer 0 at face, Layer 1 at camera) consistently applied
-- **Normalization**: Clarified as "live-only" (no offline processing)
-- **Chain Code**: Documented as post-processing only (validation functions removed)
-- **Trigger Threshold**: Clearly stated as `relative_z < 0 → Layer 1`, `>= 0 → Layer 0`
-- **Cross-references**: Added between all documentation files
-
-### Parameter Corrections
-- **depth_layers**: Fixed from 3 to 2 in `face_grid_3d.py` constructor
-  - Line 123: Changed default from `depth_layers: int = 3` to `depth_layers: int = 2`
-  - Updated docstrings and comments throughout file
-
-### Documentation Quality Improvements
-- **Invariants Documented**: Critical design rules that must be preserved
-- **Testing Checklist**: Added to ARCHITECTURE_GUIDE for validation
-- **Extension Points**: Clearly marked in API_REFERENCE for future developers
-- **Visual Diagrams**: Added to PROJECT_DOCUMENTATION and ARCHITECTURE_GUIDE
-- **Examples**: Added to API_REFERENCE and PROJECT_DOCUMENTATION
-
-### Impact Assessment
-- **Code Changes**: Minimal (only `depth_layers` parameter correction)
-- **Documentation Impact**: Major (all files now consistent and comprehensive)
-- **Functionality Impact**: None (documentation-only)
-- **Maintenance Impact**: Positive (architecture guide will reduce future bugs)
-
----
-
-### Removed Components
-1. **Chain Code Validation Functions**: `validate_chain_code()` and `validate_gesture()` removed
-   - Reason: Chain code is now stored for post-processing clustering, not real-time validation
-   - Replacement: External tools can compare chain codes using Levenshtein distance or ML models
-
-2. **Offline Normalization Script**: `normalize_dataset.py` deleted
-   - Reason: Live normalization is canonical; no offline batch processing needed
-   - All data saved in normalized form at capture time
-
-3. **Deprecated Methods**:
-   - Centroid-based normalization: `preserve_depth=False` (legacy)
-   - Hardcoded z-zones: Replaced by dynamic depth scaling
-   - MiDaS depth estimation: Completely removed from codebase
-
-### Code Divergence Issues (RESOLVED)
-- **Normalization Methods**: Two implementations existed
-  - ❌ `normalize_dataset.py`: 2D scaling + z-smoothing (DELETED)
-  - ✅ `normalize_hand_data()`: 3D scaling, no z-smoothing (CANONICAL)
-- **Status**: Unified to single live normalization method
+### Code Divergence Issues
+- **Normalization Methods**: Two different implementations
+  - `normalize_dataset.py`: 2D scaling + z-smoothing
+  - `normalize_hand_data()`: 3D scaling, no z-smoothing
+- **Recommendation**: Unify normalization methods for consistency
 
 ---
 
 ## Current Architecture
 
-### Core Modules (Phase 9 State)
+### Core Modules
 1. **main.py**: Application coordinator, state management
-2. **capture.py**: MediaPipe hand/face/pose detection, frame processing
-3. **face_grid_3d.py**: 3D voxel grid (160 voxels, 2 layers), hit tracking, chain code generation, **dynamic depth scaling**
-4. **normalization.py**: Live normalization (wrist-centering + 3D scaling + rotation)
-5. **dataset_io.py**: Dataset storage and export (JSON/CSV)
-6. **ui.py**: Tkinter GUI interface
-
-### Documentation Files (NEW)
-- **docs/ARCHITECTURE_GUIDE.md**: System design, algorithms, invariants, testing (REFERENCE FOR ALL UPDATES)
-- **docs/API_REFERENCE.md**: API signatures, usage examples, layer triggering details
-- **docs/developer_guide.md**: Codebase structure, extension points, troubleshooting
-- **PROJECT_DOCUMENTATION.md**: High-level overview, data formats, layer triggering
-- **PROJECT_LIFECYCLE_AUDIT.md**: This file — chronological evolution
+2. **capture.py**: MediaPipe hand detection, frame processing
+3. **face_grid_3d.py**: 3D voxel grid, hit tracking, chain code generation, depth scaling
+4. **normalization.py**: Normalization functions (multiple methods)
+5. **normalize_dataset.py**: Offline batch normalization script
+6. **dataset_io.py**: Dataset storage and export
+7. **ui.py**: Tkinter GUI interface
 
 ### Key Dependencies
 - MediaPipe (Hands, Face Mesh, Pose)
 - OpenCV (cv2)
 - NumPy
 - Tkinter (GUI)
-- Pillow (image processing)
 - scikit-learn (optional, for StandardScaler)
+- Pillow (image processing)
 
 ### Data Flow
 1. **Capture**: MediaPipe → Raw landmarks (MediaPipe coordinates)
-2. **Grid Operations**: Raw landmarks → Hit tracking (dynamic depth scaling), chain code generation
-3. **Saving**: Raw landmarks → Live normalization → "Standard Hand" format → Save to dataset
+2. **Grid Operations**: Raw landmarks → Hit tracking, chain code generation
+3. **Saving**: Raw landmarks → Normalize → "Standard Hand" format → Save to dataset
 4. **Export**: Dataset → JSON/CSV formats
 
 ---
@@ -337,31 +251,19 @@
 ## Summary Statistics
 
 ### Codebase Evolution
-| Metric | Count | Notes |
-|--------|-------|-------|
-| Depth Systems Tried | 2 | MiDaS → MediaPipe-only |
-| Normalization Methods | 2 | 2D palm (removed) → 3D Standard Hand (current) |
-| Layer Systems | 2 | Hardcoded zones → Dynamic depth scaling |
-| Major Features Added | 4 | Chain code, layer triggering, depth scaling, documentation |
-| Major Features Removed | 3 | MiDaS, validate_chain_code(), offline normalization |
-| Documentation Files | 5 | PROJECT_DOCUMENTATION, ARCHITECTURE_GUIDE, API_REFERENCE, developer_guide, LIFECYCLE_AUDIT |
+- **Depth Systems**: 2 (MiDaS → MediaPipe-only)
+- **Normalization Methods**: 3 (centroid-based → 2D palm → 3D Standard Hand)
+- **Layer Systems**: 2 (hardcoded zones → dynamic depth scaling)
+- **Major Features Added**: Chain code, motion signatures, dynamic depth scaling
+- **Major Features Removed**: MiDaS integration
 
 ### Current Capabilities
-- ✅ Real-time hand tracking (21 landmarks per hand)
-- ✅ Face-relative 3D spatial tracking (160-voxel grid, 2 layers)
-- ✅ **Dynamic depth-adaptive layer switching** (distance-invariant)
-- ✅ 3D motion signature (26-directional chain code)
-- ✅ Live hand normalization (wrist-center + 3D scaling + rotation)
-- ✅ Multi-format dataset export (JSON/CSV)
-- ✅ Comprehensive documentation with architecture guide
-
-### Recent Improvements (Phase 9)
-- ✅ Fixed `depth_layers` parameter from 3 to 2
-- ✅ Created ARCHITECTURE_GUIDE.md as reference for all updates
-- ✅ Standardized all documentation for consistency
-- ✅ Documented complete layer triggering algorithm
-- ✅ Added testing checklists and extension points
-- ✅ Formalized design invariants that must be preserved
+- Real-time hand tracking (21 landmarks per hand)
+- Face-relative 3D spatial tracking (240 voxel grid)
+- Dynamic depth-adaptive layer switching
+- 3D motion signature (26-directional chain code)
+- Standard Hand normalization for ML training
+- Multi-format dataset export (JSON/CSV)
 
 ---
 
