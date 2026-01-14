@@ -5,6 +5,11 @@ A Python application for building a dataset of American Sign Language (ASL) sign
 ## Features
 
 - **Real-time hand tracking**: Uses MediaPipe Hands to detect and track hand landmarks in 3D space
+- **Face-centered 3D grid tracking**: Uses MediaPipe Face Mesh to create a 3D volumetric grid around the face and track which grid points are hit by hand movements
+- **MediaPipe depth tracking**: Uses MediaPipe's built-in relative z-depth for all 3D calculations
+- **Dual data representation**: Each sample includes both:
+  - **Conventional hand-shape data**: Normalized 3D hand landmarks (shape of the hand)
+  - **Hit-grid data**: Binary vector indicating which grid points were hit during the capture session
 - **Normalized coordinates**: Converts raw landmarks to a consistent 3D coordinate system
 - **Labeled dataset collection**: Capture samples with custom labels for each ASL sign
 - **Multiple export formats**: Save datasets as CSV or JSON
@@ -12,7 +17,7 @@ A Python application for building a dataset of American Sign Language (ASL) sign
 
 ## Requirements
 
-- Python 3.12 for mediapipe 
+- Python 3.8+ for mediapipe 
 - Webcam/camera connected to your computer
 - Windows, macOS, or Linux
 
@@ -51,8 +56,14 @@ A Python application for building a dataset of American Sign Language (ASL) sign
    - Repeat for additional signs
 
 3. **Viewing collected samples**:
-   - The "Recent Sample" panel shows the normalized 3D coordinates of the last captured sample
+   - The "Recent Sample" panel shows:
+     - The normalized 3D coordinates of the last captured sample
+     - The number of grid points hit during the capture (e.g., "Hit grid points: 87 / 160" - 2-layer voxel grid)
    - The "Collected Samples" table shows all samples collected in the current session
+   - During capture, the grid is visualized on the camera preview:
+     - Gray points: Grid points not yet hit
+     - Green/Red points: Grid points that have been hit by hand movements
+   - **Hit Count display**: Shows the number of voxels hit (X/160 - 2-layer voxel grid using MediaPipe z-depth)
 
 4. **Exporting the dataset**:
    - Click **"Export Dataset"** to save all collected samples to a file
@@ -64,6 +75,13 @@ A Python application for building a dataset of American Sign Language (ASL) sign
 
 ## Dataset Format
 
+Each sample in the dataset contains two complementary data representations:
+
+1. **Conventional hand-shape data**: Normalized 3D hand landmarks representing the shape of the hand
+2. **Hit-grid data**: A binary vector (0s and 1s) indicating which grid points were hit during the capture session
+
+**Note**: The grid is always 2 layers deep (8 × 10 × 2 = 160 voxels by default). All z-coordinates come from MediaPipe's relative depth values.
+
 ### JSON Format
 
 The JSON export creates a file with the following structure:
@@ -72,7 +90,7 @@ The JSON export creates a file with the following structure:
 {
   "metadata": {
     "total_samples": 10,
-    "exported_at": "2024-01-15T10:30:00",
+    "exported_at": "2024-01-10T10:30:00",
     "format_version": "1.0"
   },
   "samples": [
@@ -82,6 +100,7 @@ The JSON export creates a file with the following structure:
       "hand": "right",
       "num_points": 21,
       "points": [x1, y1, z1, x2, y2, z2, ...],
+      "hit_order": [0, 5, 12, 45, ...],
       "timestamp": "2024-01-15T10:25:00"
     },
     ...
@@ -97,6 +116,7 @@ The CSV export creates a file with columns:
 - `hand`: Which hand(s) detected ("left", "right", "both", "unknown")
 - `num_points`: Number of 3D points in the sample
 - `point_0_x`, `point_0_y`, `point_0_z`, `point_1_x`, ...: Flattened 3D coordinates
+- `hit_order`: Ordered list of voxel indices representing the sequence in which grid points were hit during capture
 
 ## Project Structure
 
@@ -117,19 +137,47 @@ signTalk/
 
 1. **Hand Detection**: MediaPipe Hands processes each camera frame to detect hand landmarks (21 points per hand in 3D space)
 
-2. **Normalization**: Raw landmarks are normalized to a consistent coordinate system:
-   - Translated to origin (centered)
-   - Scaled to unit size
-   - Applied spacing ratio for overall scaling
-   - Results in a fixed-size list of 3D points
+2. **Face Detection and Grid Construction**: MediaPipe Face Mesh detects the face and constructs a 3D volumetric grid:
+   - Creates a 3D voxel grid (default: 8 points wide × 10 points tall × 2 points deep = 160 voxels) centered on the nose
+   - Uses MediaPipe Face Mesh landmark z values (normalized to 0-1 range) for all depth calculations
+   - Identifies nose center (stable reference point) and calculates eye positions to determine grid spacing
+   - Grid extends around the head region
+   - Voxel centers are distributed in width (x), height (y), and depth (z) dimensions
+   - **Voxel ordering**: z-major (layer by layer from near→far), within each layer: row-major over Y then X
+     - Index formula: `idx = z_idx * (breadth * length) + y_idx * breadth + x_idx`
+     - Example for default 8×10×2 grid: `idx = z_idx * 80 + y_idx * 8 + x_idx`
+
+3. **Voxel Hit Tracking**: During capture (from Start to Stop):
+   - For each frame, hand movements are tracked using a calculated palm trigger point
+   - Uses MediaPipe landmark z values (normalized) for all 3D distance calculations
+   - The trigger point moves based on finger spread (more towards fingertips when fingers are open)
+   - If the trigger point is within `hit_radius_norm` (default: 0.12) of a voxel center (in normalized x, y, z space), that voxel is marked as "hit"
+   - The hit status accumulates over the entire capture session (not just a single frame)
+   - Results in an ordered list `hit_order`: sequence of voxel indices visited during the capture
+
+4. **Normalization**: Raw hand landmarks are normalized to a consistent coordinate system in real-time during capture:
+   - Translated to origin (wrist at center)
+   - Scaled to unit size based on wrist-to-middle-finger distance
+   - Rotated to align the hand orientation consistently
+   - Results in a fixed-size list of 3D points ready for ML training
 
 3. **Data Storage**: Each sample includes:
    - Unique ID
    - User-provided label
    - Hand information (left/right/both)
-   - Flattened 3D coordinates (x1, y1, z1, x2, y2, z2, ...)
+   - Normalized 3D coordinates as numbered points: `[{"index": 0, "x": ..., "y": ..., "z": ...}, ...]`
+   - `points_flat`: Flattened 3D coordinates (x1, y1, z1, x2, y2, z2, ...) for backward compatibility
+   - `hit_order`: Ordered list of voxel indices representing the sequence in which grid points were hit during capture
+   - All z-coordinates use MediaPipe's relative depth values
 
-4. **Export**: Samples can be exported in ML-friendly formats (CSV or JSON) for training models
+6. **Export**: Samples can be exported in ML-friendly formats (CSV or JSON) for training models
+
+### Why Two Data Representations?
+
+- **Hand-shape data**: Captures the static shape/pose of the hand at the end of the capture
+- **Hit-grid data**: Captures the dynamic spatial pattern of hand movement relative to the face during the entire capture session
+
+Together, these provide complementary information that can improve ASL recognition accuracy.
 
 ## Configuration
 
