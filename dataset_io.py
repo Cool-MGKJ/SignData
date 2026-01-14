@@ -5,8 +5,8 @@ This module handles storing and saving labelled ASL sign samples
 in both CSV and JSON formats.
 
 Developer Notes:
-- `DatasetManager.add_sample()` stores both numbered point objects and a flattened
-  `points_flat` representation for backwards compatibility with earlier consumers.
+- `DatasetManager.add_sample()` stores points separately for left and right hands.
+- No timestamps are included to reduce data size.
 - Samples include `hit_order` and `chain_code` metadata for later clustering and analysis.
 - Export helpers write JSON or CSV suitable for ingestion by ML pipelines.
 """
@@ -15,7 +15,6 @@ import json
 import csv
 import os
 from typing import List, Tuple, Optional
-from datetime import datetime
 
 
 class DatasetManager:
@@ -29,8 +28,8 @@ class DatasetManager:
     def add_sample(
         self,
         label: str,
-        normalized_points: List[Tuple[float, float, float]],
-        hand: str = "unknown",
+        points_left: Optional[List[Tuple[float, float, float]]] = None,
+        points_right: Optional[List[Tuple[float, float, float]]] = None,
         hit_order: Optional[List[int]] = None,
         chain_code: Optional[List[int]] = None,
         palm_angles_left: Optional[List[tuple]] = None,
@@ -43,8 +42,8 @@ class DatasetManager:
 
         Args:
             label: The ASL sign label (e.g., "hello", "thank you")
-            normalized_points: List of normalized (x, y, z) tuples
-            hand: Which hand(s) detected ("left", "right", "both", "unknown")
+            points_left: List of normalized (x, y, z) tuples for left hand
+            points_right: List of normalized (x, y, z) tuples for right hand
             hit_order: Ordered list of voxel indices representing hit sequence
             chain_code: List of direction indices (0-25) representing trajectory
             palm_angles_left: List of (yaw, pitch, roll) tuples for left hand
@@ -58,29 +57,23 @@ class DatasetManager:
         sample_id = self.next_id
         self.next_id += 1
         
-        # Store points as numbered objects: [{"index": 0, "x": ..., "y": ..., "z": ...}, ...]
-        numbered_points = []
-        for idx, point in enumerate(normalized_points):
-            numbered_points.append({
-                'index': idx,
-                'x': point[0],
-                'y': point[1],
-                'z': point[2]
-            })
+        # Store points as numbered objects for both hands
+        def format_points(points_list):
+            if points_list is None:
+                return []
+            return [
+                {'index': idx, 'x': point[0], 'y': point[1], 'z': point[2]}
+                for idx, point in enumerate(points_list)
+            ]
         
-        # Also keep flattened format for backward compatibility
-        flattened_points = []
-        for point in normalized_points:
-            flattened_points.extend([point[0], point[1], point[2]])
+        left_points = format_points(points_left)
+        right_points = format_points(points_right)
         
         sample = {
             'id': sample_id,
             'label': label,
-            'hand': hand,
-            'points': numbered_points,  # New numbered format
-            'points_flat': flattened_points,  # Keep for backward compatibility
-            'num_points': len(normalized_points),
-            'timestamp': datetime.now().isoformat(),
+            'points_left': left_points,
+            'points_right': right_points,
             'hit_order': hit_order if hit_order is not None else [],
             'chain_code': chain_code if chain_code is not None else [],
             'palm_angles_left': palm_angles_left if palm_angles_left is not None else [],
@@ -90,7 +83,7 @@ class DatasetManager:
         }
 
         self.samples.append(sample)
-        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}, Palm Angles L={len(sample['palm_angles_left'])}, R={len(sample['palm_angles_right'])}")
+        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points_L={len(left_points)}, Points_R={len(right_points)}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}")
         return sample_id
     
     def get_all_samples(self) -> List[dict]:
@@ -217,19 +210,16 @@ class DatasetManager:
         The JSON format will be:
         {
             "metadata": {
-                "total_samples": 10,
-                "exported_at": "2024-01-10T10:30:00",
-                "format_version": "1.0"
+                "total_samples": 10
             },
             "samples": [
                 {
                     "id": 1,
                     "label": "hello",
-                    "hand": "right",
-                    "num_points": 21,
-                    "points": [x1, y1, z1, x2, y2, z2, ...],
+                    "points_left": [{"index": 0, "x": 0.5, "y": 0.4, "z": 0.2}, ...],
+                    "points_right": [{"index": 0, "x": 0.5, "y": 0.4, "z": 0.2}, ...],
                     "hit_order": [0, 5, 12, ...],
-                    "timestamp": "..."
+                    "chain_code": [...]
                 },
                 ...
             ]
@@ -271,9 +261,7 @@ class DatasetManager:
         # Create output structure
         output = {
             'metadata': {
-                'total_samples': len(all_samples),
-                'exported_at': datetime.now().isoformat(),
-                'format_version': '1.0'
+                'total_samples': len(all_samples)
             },
             'samples': all_samples
         }

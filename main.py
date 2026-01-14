@@ -167,29 +167,31 @@ class ASLDataCollectionApp:
         Returns:
             True if successful, False otherwise
         """
-        # Allow saving even if no landmarks were captured
+        # Separate left and right hand points
+        points_left = []
+        points_right = []
+        
         if self.captured_landmarks is None or len(self.captured_landmarks) == 0:
-            # Save with empty points and hit order
-            normalized_points = []
-            hand_info = "none"
+            # No landmarks captured
+            points_left = []
+            points_right = []
         else:
             # Apply "Standard Hand" normalization when saving to dataset
             # This ensures consistent representation for PCA/clustering
-            hand_info = get_hand_info(self.captured_landmarks)
-            
-            # Normalize each hand to "Standard Hand" format (wrist at origin, unit scale, rotated)
-            normalized_points = []
             for hand_data in self.captured_landmarks:
                 landmarks = hand_data.get('landmarks', [])
+                handedness = hand_data.get('handedness', 'Unknown')
+                
                 if len(landmarks) == 21:
                     # Apply Standard Hand normalization
                     from normalization import normalize_hand_data
                     normalized = normalize_hand_data(landmarks, apply_rotation=True)
-                    normalized_points.extend(normalized)
-            
-            if not normalized_points:
-                normalized_points = []
-                hand_info = "none"
+                    
+                    # Store in appropriate left/right array
+                    if handedness == 'Left':
+                        points_left = normalized
+                    elif handedness == 'Right':
+                        points_right = normalized
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
         chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
@@ -198,11 +200,11 @@ class ASLDataCollectionApp:
         trigger_distance_left = self.captured_trigger_distance_left if self.captured_trigger_distance_left is not None else []
         trigger_distance_right = self.captured_trigger_distance_right if self.captured_trigger_distance_right is not None else []
 
-        # Add to dataset with chain code and palm angle/distance data
+        # Add to dataset with separated left/right points
         sample_id = self.dataset.add_sample(
             label=label,
-            normalized_points=normalized_points,
-            hand=hand_info,
+            points_left=points_left if points_left else None,
+            points_right=points_right if points_right else None,
             hit_order=hit_order,
             chain_code=chain_code,
             palm_angles_left=palm_angles_left,
@@ -212,14 +214,15 @@ class ASLDataCollectionApp:
         )
         
         # Debug output
-        print(f"Sample saved: ID={sample_id}, Label={label}, Points={len(normalized_points)}, Hit Order Length={len(hit_order)}")
+        print(f"Sample saved: ID={sample_id}, Label={label}, Points_L={len(points_left)}, Points_R={len(points_right)}, Hit Order Length={len(hit_order)}")
         
         # Update UI
+        total_points = len(points_left) + len(points_right)
         self.ui.add_sample_to_table(
             sample_id,
             label,
-            hand_info,
-            len(normalized_points)
+            "left/right",
+            total_points
         )
         self.ui.update_sample_count(self.dataset.get_sample_count())
         
