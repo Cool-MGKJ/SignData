@@ -182,16 +182,27 @@ class ASLDataCollectionApp:
                 landmarks = hand_data.get('landmarks', [])
                 handedness = hand_data.get('handedness', 'Unknown')
                 
+                # Debug: Print what we're processing
+                print(f"Processing hand: handedness={handedness}, num_landmarks={len(landmarks)}")
+                
                 if len(landmarks) == 21:
                     # Apply Standard Hand normalization
                     from normalization import normalize_hand_data
                     normalized = normalize_hand_data(landmarks, apply_rotation=True)
+                    
+                    # Debug: Print what we normalized
+                    print(f"Normalized {handedness} hand: {len(normalized)} points")
                     
                     # Store in appropriate left/right array
                     if handedness == 'Left':
                         points_left = normalized
                     elif handedness == 'Right':
                         points_right = normalized
+                    else:
+                        # Unknown handedness - try to store it somewhere
+                        print(f"WARNING: Unknown handedness '{handedness}', storing as right hand")
+                        if not points_right:  # If right not set, use this
+                            points_right = normalized
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
         chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
