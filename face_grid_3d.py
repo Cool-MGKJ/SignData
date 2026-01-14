@@ -210,6 +210,13 @@ class FaceGrid3D:
         self.current_gesture_chain = []  # List of direction indices (0-25) representing movement trajectory
         self.jitter_threshold = 0.02  # Minimum movement distance to record a direction change
         self.is_capturing_chain = False  # Flag to track if chain code should be updated (only during capture)
+        
+        # Palm angle tracking system
+        self.palm_angle_threshold = 5.0  # Degrees: record when angle change exceeds this
+        self.palm_angles = {}  # Dict mapping hand_type -> list of angles recorded
+        self.last_palm_angle = {}  # Dict mapping hand_type -> last recorded angle (degrees)
+        self.palm_angle_change_history = {}  # Dict mapping hand_type -> list of tuples (angle, angle_change_deg)
+        self.angle_change_tolerance = 0.1  # Minimum angle change to avoid floating point noise
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -228,6 +235,10 @@ class FaceGrid3D:
         # Reset chain code tracking
         self.current_gesture_chain = []
         self.is_capturing_chain = False
+        # Reset palm angle tracking
+        self.palm_angles = {}
+        self.last_palm_angle = {}
+        self.palm_angle_change_history = {}
     
     def start_chain_capture(self):
         """Start capturing chain code (call when capture starts)."""
@@ -466,6 +477,169 @@ class FaceGrid3D:
         if len(self.current_gesture_chain) == 0 or self.current_gesture_chain[-1] != best_direction_idx:
             self.current_gesture_chain.append(best_direction_idx)
     
+    def calculate_palm_angle(self, hand_landmarks: List[Tuple[float, float, float]]) -> Optional[float]:
+        """
+        Calculate palm angle in 3D space.
+        
+        The angle is calculated as the rotation of the palm plane (wrist → middle MCP → ring MCP normal vector)
+        relative to a reference plane. Returns angle in degrees (0-360).
+        
+        Args:
+            hand_landmarks: List of 21 (x, y, z) tuples from MediaPipe Hand
+            
+        Returns:
+            Palm angle in degrees (0-360), or None if calculation fails
+        """
+        if len(hand_landmarks) < 21:
+            return None
+        
+        # MediaPipe hand landmark indices
+        WRIST = 0
+        MIDDLE_MCP = 9
+        RING_MCP = 13
+        INDEX_MCP = 5
+        
+        try:
+            wrist = np.array(hand_landmarks[WRIST][:3])
+            middle_mcp = np.array(hand_landmarks[MIDDLE_MCP][:3])
+            ring_mcp = np.array(hand_landmarks[RING_MCP][:3])
+            index_mcp = np.array(hand_landmarks[INDEX_MCP][:3])
+            
+            # Calculate two vectors on the palm plane
+            vec1 = middle_mcp - wrist  # Wrist to middle MCP
+            vec2 = ring_mcp - wrist    # Wrist to ring MCP
+            
+            # Calculate normal to palm plane (cross product)
+            palm_normal = np.cross(vec1, vec2)
+            palm_normal_norm = np.linalg.norm(palm_normal)
+            
+            if palm_normal_norm < 1e-6:  # Vectors too close to parallel
+                return None
+            
+            palm_normal = palm_normal / palm_normal_norm
+            
+            # Calculate angle relative to reference vector (world +Y axis)
+            reference_vec = np.array([0, 1, 0])
+            
+            # Dot product gives cosine of angle
+            cos_angle = np.dot(palm_normal, reference_vec)
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Clamp to avoid numerical errors
+            
+            # Angle in radians, then convert to degrees
+            angle_rad = np.arccos(cos_angle)
+            angle_deg = np.degrees(angle_rad)
+            
+            # Normalize to 0-180 range
+            if angle_deg > 180:
+                angle_deg = 360 - angle_deg
+            
+            return angle_deg
+        
+        except (ValueError, IndexError):
+            return None
+    
+    def update_palm_angle(self, hand_type: str, hand_landmarks: List[Tuple[float, float, float]]) -> Optional[Dict]:
+        """
+        Update palm angle tracking for a hand and record if change exceeds threshold.
+        
+        Args:
+            hand_type: "left" or "right"
+            hand_landmarks: List of 21 (x, y, z) tuples from MediaPipe Hand
+            
+        Returns:
+            Dictionary with angle info if angle was recorded, None otherwise
+            ```
+            {
+                "hand": "right",
+                "angle_deg": 45.2,
+                "angle_change_deg": 7.5,
+                "recorded": True  # True if change >= threshold
+            }
+            ```
+        """
+        if hand_landmarks is None:
+            return None
+        
+        current_angle = self.calculate_palm_angle(hand_landmarks)
+        
+        if current_angle is None:
+            return None
+        
+        # Initialize tracking for this hand if needed
+        if hand_type not in self.palm_angles:
+            self.palm_angles[hand_type] = []
+            self.last_palm_angle[hand_type] = current_angle
+            self.palm_angle_change_history[hand_type] = []
+            
+            # Record initial angle
+            self.palm_angles[hand_type].append(current_angle)
+            return {
+                "hand": hand_type,
+                "angle_deg": current_angle,
+                "angle_change_deg": 0.0,
+                "recorded": True,
+                "reason": "initial"
+            }
+        
+        # Calculate angle change
+        prev_angle = self.last_palm_angle[hand_type]
+        angle_change = abs(current_angle - prev_angle)
+        
+        # Handle wraparound (e.g., 359° to 1° = 2° change, not 358°)
+        if angle_change > 180:
+            angle_change = 360 - angle_change
+        
+        # Check if change exceeds threshold
+        recorded = False
+        reason = None
+        
+        if angle_change > self.palm_angle_threshold:
+            self.palm_angles[hand_type].append(current_angle)
+            self.last_palm_angle[hand_type] = current_angle
+            self.palm_angle_change_history[hand_type].append((current_angle, angle_change))
+            recorded = True
+            reason = f"exceeded_threshold_{self.palm_angle_threshold}deg"
+        elif angle_change > self.angle_change_tolerance:
+            # Update internal state but don't record (below threshold)
+            self.last_palm_angle[hand_type] = current_angle
+            recorded = False
+            reason = f"below_threshold_{self.palm_angle_threshold}deg"
+        
+        return {
+            "hand": hand_type,
+            "angle_deg": current_angle,
+            "angle_change_deg": angle_change,
+            "recorded": recorded,
+            "reason": reason
+        }
+    
+    def get_palm_angles(self, hand_type: Optional[str] = None) -> Dict:
+        """
+        Get recorded palm angles for a hand or both hands.
+        
+        Args:
+            hand_type: "left", "right", or None (for both)
+            
+        Returns:
+            Dictionary mapping hand_type -> list of angles
+        """
+        if hand_type is not None:
+            return {hand_type: self.palm_angles.get(hand_type, [])}
+        return self.palm_angles.copy()
+    
+    def get_palm_angle_change_history(self, hand_type: Optional[str] = None) -> Dict:
+        """
+        Get history of angle changes exceeding threshold.
+        
+        Args:
+            hand_type: "left", "right", or None (for both)
+            
+        Returns:
+            Dictionary mapping hand_type -> list of (angle, angle_change_deg) tuples
+        """
+        if hand_type is not None:
+            return {hand_type: self.palm_angle_change_history.get(hand_type, [])}
+        return self.palm_angle_change_history.copy()
 
     
     def calculate_reference_length_from_pose(self, pose_results) -> Optional[float]:
@@ -984,6 +1158,15 @@ class FaceGrid3D:
                     
                     # Calculate chain code direction for trajectory validation
                     self._update_chain_code(nearest_voxel_idx)
+            
+            # Track palm angle changes for this hand
+            hand_type = hand_data.get('hand_type', 'unknown')
+            if hand_type in ['left', 'right']:
+                palm_angle_info = self.update_palm_angle(hand_type, landmarks)
+                # Palm angle tracking is optional; uncomment for debug output:
+                # if palm_angle_info and palm_angle_info['recorded']:
+                #     print(f"[{hand_type.upper()} Palm] Angle={palm_angle_info['angle_deg']:.1f}° "
+                #           f"Change={palm_angle_info['angle_change_deg']:.1f}° (Recorded)")
     
     def draw_grid(
         self,
