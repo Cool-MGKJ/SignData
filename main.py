@@ -50,13 +50,12 @@ class ASLDataCollectionApp:
         self.captured_hit_order = None
         self.captured_chain_code = None  # Chain code captured during gesture
         self.last_known_landmarks = None  # Track last known hand posture during capture
-<<<<<<< HEAD
         
         # Palm orientation tracking
         self.last_saved_angles = {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}  # Initialize to zero
         self.current_palm_angles = None  # Current frame's palm angles
 =======
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
+
         
         # Setup callbacks
         self.ui.set_callbacks(
@@ -86,10 +85,9 @@ class ASLDataCollectionApp:
         self.capture.start_grid_tracking()
         self.captured_hit_order = None
         self.last_known_landmarks = None  # Reset last known landmarks at start of capture
-<<<<<<< HEAD
         self.current_palm_angles = None  # Reset palm angles at start of capture
 =======
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
+
     
     def stop_capture(self):
         """Stop capture and process the current frame."""
@@ -118,7 +116,6 @@ class ASLDataCollectionApp:
         self.captured_hit_order = self.capture.get_hit_order()
         self.captured_chain_code = self.capture.get_chain_code()
         
-<<<<<<< HEAD
         # Capture palm angles from the current frame (if available)
         # Use current_palm_angles if calculated during capture, otherwise calculate now
         if self.current_palm_angles is None and self.captured_landmarks:
@@ -135,7 +132,7 @@ class ASLDataCollectionApp:
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
         
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
+
         # Apply "Standard Hand" normalization for display
         # The captured landmarks are in raw MediaPipe format (for grid operations)
         # Normalize them here for consistent visualization
@@ -209,7 +206,6 @@ class ASLDataCollectionApp:
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
         chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
-<<<<<<< HEAD
         
         # Get palm angles (use current if available, otherwise calculate)
         palm_angles = self.current_palm_angles
@@ -237,16 +233,11 @@ class ASLDataCollectionApp:
             # Still proceed with save (user can decide)
 
         # Add to dataset with chain code and palm angles
-=======
-
-        # Add to dataset with chain code
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
         sample_id = self.dataset.add_sample(
             label=label,
             normalized_points=normalized_points,
             hand=hand_info,
             hit_order=hit_order,
-<<<<<<< HEAD
             chain_code=chain_code,
             palm_angles=palm_angles
         )
@@ -256,11 +247,6 @@ class ASLDataCollectionApp:
         print(f"Sample saved with palm orientation: Pitch={palm_angles['pitch']:.2f}°, "
               f"Yaw={palm_angles['yaw']:.2f}°, Roll={palm_angles['roll']:.2f}°")
         
-=======
-            chain_code=chain_code
-        )
-        
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
         # Debug output
         print(f"Sample saved: ID={sample_id}, Label={label}, Points={len(normalized_points)}, Hit Order Length={len(hit_order)}")
         
@@ -281,10 +267,7 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_hit_order = None
         self.captured_chain_code = None
-<<<<<<< HEAD
         self.current_palm_angles = None
-=======
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
         
         return True
     
@@ -360,17 +343,12 @@ class ASLDataCollectionApp:
                 total_grid_points = self.capture.get_num_grid_points()
                 self.ui.update_hit_count(num_hit, total_grid_points)
             
-<<<<<<< HEAD
             # If capturing, calculate palm orientation and check for 5-degree change
-=======
-            # If capturing, store the current frame and update last known landmarks
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
             if self.is_capturing:
                 self.captured_frame = frame.copy()
                 # Update last known landmarks if hands are detected in this frame
                 if landmarks_list and len(landmarks_list) > 0:
                     self.last_known_landmarks = landmarks_list
-<<<<<<< HEAD
                     
                     # Calculate palm orientation for the first detected hand
                     first_hand_landmarks = landmarks_list[0].get('landmarks', [])
@@ -385,8 +363,6 @@ class ASLDataCollectionApp:
                                 # For now, we'll store the angles and they'll be saved when user clicks "Save Sample"
                                 # The threshold check ensures we only save when orientation changes significantly
                                 pass  # Will be saved when user clicks "Save Sample"
-=======
->>>>>>> 459f47d1f1334af1b7c8baa0d40c8f04218f4eb4
             
             # Update UI
             self.ui.update_camera_frame(annotated_frame)
