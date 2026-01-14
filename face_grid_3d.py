@@ -224,6 +224,8 @@ class FaceGrid3D:
         # Trigger distance tracking (distance from trigger point to nose)
         self.trigger_distance_left = []  # List of distances for left hand
         self.trigger_distance_right = []  # List of distances for right hand
+        self.trigger_point_left = []  # List of (x, y, z) wrist positions for left hand
+        self.trigger_point_right = []  # List of (x, y, z) wrist positions for right hand
         self.initial_distance_left = None  # Initial distance for left hand
         self.initial_distance_right = None  # Initial distance for right hand
         self.last_recorded_distance_left = None  # Last recorded distance for left hand
@@ -257,6 +259,8 @@ class FaceGrid3D:
         # Reset trigger distance tracking
         self.trigger_distance_left = []
         self.trigger_distance_right = []
+        self.trigger_point_left = []
+        self.trigger_point_right = []
         self.initial_distance_left = None
         self.initial_distance_right = None
         self.last_recorded_distance_left = None
@@ -1191,6 +1195,7 @@ class FaceGrid3D:
                         
                         if distance_change > self.distance_change_threshold:
                             self.trigger_distance_left.append(trigger_distance)
+                            self.trigger_point_left.append(tuple(trigger_point))
                             self.last_recorded_distance_left = trigger_distance
                 else:
                     # Right hand
@@ -1203,6 +1208,7 @@ class FaceGrid3D:
                         
                         if distance_change > self.distance_change_threshold:
                             self.trigger_distance_right.append(trigger_distance)
+                            self.trigger_point_right.append(tuple(trigger_point))
                             self.last_recorded_distance_right = trigger_distance
     
     def draw_grid(
@@ -1454,6 +1460,24 @@ class FaceGrid3D:
             List of distances recorded when distance change exceeded threshold
         """
         return self.trigger_distance_right.copy()
+    
+    def get_trigger_point_left(self) -> List[Tuple[float, float, float]]:
+        """
+        Get recorded trigger point (wrist) positions for left hand.
+        
+        Returns:
+            List of (x, y, z) tuples recorded when distance change exceeded threshold
+        """
+        return self.trigger_point_left.copy()
+    
+    def get_trigger_point_right(self) -> List[Tuple[float, float, float]]:
+        """
+        Get recorded trigger point (wrist) positions for right hand.
+        
+        Returns:
+            List of (x, y, z) tuples recorded when distance change exceeded threshold
+        """
+        return self.trigger_point_right.copy()
     
     def release(self):
         """Release MediaPipe Face Mesh resources."""

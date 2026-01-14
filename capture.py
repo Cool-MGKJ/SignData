@@ -667,6 +667,18 @@ class HandCapture:
             return self.face_grid_tracker.get_trigger_distance_right()
         return []
     
+    def get_trigger_point_left(self) -> List[Tuple[float, float, float]]:
+        """Get recorded trigger point (wrist) positions for left hand."""
+        if hasattr(self.face_grid_tracker, 'get_trigger_point_left'):
+            return self.face_grid_tracker.get_trigger_point_left()
+        return []
+    
+    def get_trigger_point_right(self) -> List[Tuple[float, float, float]]:
+        """Get recorded trigger point (wrist) positions for right hand."""
+        if hasattr(self.face_grid_tracker, 'get_trigger_point_right'):
+            return self.face_grid_tracker.get_trigger_point_right()
+        return []
+    
     def release(self):
         """Release camera resources."""
         if self.cap is not None:

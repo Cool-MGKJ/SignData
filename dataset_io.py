@@ -35,7 +35,9 @@ class DatasetManager:
         palm_angles_left: Optional[List[tuple]] = None,
         palm_angles_right: Optional[List[tuple]] = None,
         trigger_distance_left: Optional[List[float]] = None,
-        trigger_distance_right: Optional[List[float]] = None
+        trigger_distance_right: Optional[List[float]] = None,
+        trigger_point_left: Optional[List[Tuple[float, float, float]]] = None,
+        trigger_point_right: Optional[List[Tuple[float, float, float]]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -50,6 +52,8 @@ class DatasetManager:
             palm_angles_right: List of (yaw, pitch, roll) tuples for right hand
             trigger_distance_left: List of distances from trigger point to nose for left hand
             trigger_distance_right: List of distances from trigger point to nose for right hand
+            trigger_point_left: List of (x, y, z) wrist positions for left hand
+            trigger_point_right: List of (x, y, z) wrist positions for right hand
 
         Returns:
             The unique sample ID assigned to this sample
