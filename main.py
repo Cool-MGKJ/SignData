@@ -54,8 +54,7 @@ class ASLDataCollectionApp:
         # Palm orientation tracking
         self.last_saved_angles = {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}  # Initialize to zero
         self.current_palm_angles = None  # Current frame's palm angles
-=======
-
+        
         
         # Setup callbacks
         self.ui.set_callbacks(
@@ -86,7 +85,7 @@ class ASLDataCollectionApp:
         self.captured_hit_order = None
         self.last_known_landmarks = None  # Reset last known landmarks at start of capture
         self.current_palm_angles = None  # Reset palm angles at start of capture
-=======
+
 
     
     def stop_capture(self):
@@ -127,7 +126,7 @@ class ASLDataCollectionApp:
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
         
-=======
+
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
