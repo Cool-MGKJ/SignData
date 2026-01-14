@@ -643,6 +643,30 @@ class HandCapture:
         """Get the total number of grid points."""
         return self.face_grid_tracker.num_voxels
     
+    def get_palm_angles_left(self) -> List[tuple]:
+        """Get recorded palm angle changes for left hand."""
+        if hasattr(self.face_grid_tracker, 'get_palm_angles_left'):
+            return self.face_grid_tracker.get_palm_angles_left()
+        return []
+    
+    def get_palm_angles_right(self) -> List[tuple]:
+        """Get recorded palm angle changes for right hand."""
+        if hasattr(self.face_grid_tracker, 'get_palm_angles_right'):
+            return self.face_grid_tracker.get_palm_angles_right()
+        return []
+    
+    def get_trigger_distance_left(self) -> List[float]:
+        """Get recorded trigger distance changes for left hand."""
+        if hasattr(self.face_grid_tracker, 'get_trigger_distance_left'):
+            return self.face_grid_tracker.get_trigger_distance_left()
+        return []
+    
+    def get_trigger_distance_right(self) -> List[float]:
+        """Get recorded trigger distance changes for right hand."""
+        if hasattr(self.face_grid_tracker, 'get_trigger_distance_right'):
+            return self.face_grid_tracker.get_trigger_distance_right()
+        return []
+    
     def release(self):
         """Release camera resources."""
         if self.cap is not None:

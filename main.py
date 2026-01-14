@@ -48,6 +48,10 @@ class ASLDataCollectionApp:
         self.captured_landmarks = None
         self.captured_hit_order = None
         self.captured_chain_code = None  # Chain code captured during gesture
+        self.captured_palm_angles_left = None  # Palm angles for left hand
+        self.captured_palm_angles_right = None  # Palm angles for right hand
+        self.captured_trigger_distance_left = None  # Trigger distances for left hand
+        self.captured_trigger_distance_right = None  # Trigger distances for right hand
         self.last_known_landmarks = None  # Track last known hand posture during capture
         
         # Setup callbacks
@@ -105,6 +109,12 @@ class ASLDataCollectionApp:
         # Do this BEFORE resetting the grid
         self.captured_hit_order = self.capture.get_hit_order()
         self.captured_chain_code = self.capture.get_chain_code()
+        
+        # Get palm angles and trigger distances for both hands
+        self.captured_palm_angles_left = self.capture.get_palm_angles_left()
+        self.captured_palm_angles_right = self.capture.get_palm_angles_right()
+        self.captured_trigger_distance_left = self.capture.get_trigger_distance_left()
+        self.captured_trigger_distance_right = self.capture.get_trigger_distance_right()
         
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
@@ -183,14 +193,22 @@ class ASLDataCollectionApp:
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
         chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
+        palm_angles_left = self.captured_palm_angles_left if self.captured_palm_angles_left is not None else []
+        palm_angles_right = self.captured_palm_angles_right if self.captured_palm_angles_right is not None else []
+        trigger_distance_left = self.captured_trigger_distance_left if self.captured_trigger_distance_left is not None else []
+        trigger_distance_right = self.captured_trigger_distance_right if self.captured_trigger_distance_right is not None else []
 
-        # Add to dataset with chain code
+        # Add to dataset with chain code and palm angle/distance data
         sample_id = self.dataset.add_sample(
             label=label,
             normalized_points=normalized_points,
             hand=hand_info,
             hit_order=hit_order,
-            chain_code=chain_code
+            chain_code=chain_code,
+            palm_angles_left=palm_angles_left,
+            palm_angles_right=palm_angles_right,
+            trigger_distance_left=trigger_distance_left,
+            trigger_distance_right=trigger_distance_right
         )
         
         # Debug output
@@ -213,6 +231,10 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_hit_order = None
         self.captured_chain_code = None
+        self.captured_palm_angles_left = None
+        self.captured_palm_angles_right = None
+        self.captured_trigger_distance_left = None
+        self.captured_trigger_distance_right = None
         
         return True
     

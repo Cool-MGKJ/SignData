@@ -32,7 +32,11 @@ class DatasetManager:
         normalized_points: List[Tuple[float, float, float]],
         hand: str = "unknown",
         hit_order: Optional[List[int]] = None,
-        chain_code: Optional[List[int]] = None
+        chain_code: Optional[List[int]] = None,
+        palm_angles_left: Optional[List[tuple]] = None,
+        palm_angles_right: Optional[List[tuple]] = None,
+        trigger_distance_left: Optional[List[float]] = None,
+        trigger_distance_right: Optional[List[float]] = None
     ) -> int:
         """
         Add a new sample to the dataset.
@@ -42,6 +46,11 @@ class DatasetManager:
             normalized_points: List of normalized (x, y, z) tuples
             hand: Which hand(s) detected ("left", "right", "both", "unknown")
             hit_order: Ordered list of voxel indices representing hit sequence
+            chain_code: List of direction indices (0-25) representing trajectory
+            palm_angles_left: List of (yaw, pitch, roll) tuples for left hand
+            palm_angles_right: List of (yaw, pitch, roll) tuples for right hand
+            trigger_distance_left: List of distances from trigger point to nose for left hand
+            trigger_distance_right: List of distances from trigger point to nose for right hand
 
         Returns:
             The unique sample ID assigned to this sample
@@ -73,11 +82,15 @@ class DatasetManager:
             'num_points': len(normalized_points),
             'timestamp': datetime.now().isoformat(),
             'hit_order': hit_order if hit_order is not None else [],
-            'chain_code': chain_code if chain_code is not None else []
+            'chain_code': chain_code if chain_code is not None else [],
+            'palm_angles_left': palm_angles_left if palm_angles_left is not None else [],
+            'palm_angles_right': palm_angles_right if palm_angles_right is not None else [],
+            'trigger_distance_left': trigger_distance_left if trigger_distance_left is not None else [],
+            'trigger_distance_right': trigger_distance_right if trigger_distance_right is not None else []
         }
 
         self.samples.append(sample)
-        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}")
+        print(f"Added sample to dataset: ID={sample_id}, Label={label}, Points={len(flattened_points)//3}, Hit Order={len(sample['hit_order'])}, Chain Code={len(sample['chain_code'])}, Palm Angles L={len(sample['palm_angles_left'])}, R={len(sample['palm_angles_right'])}")
         return sample_id
     
     def get_all_samples(self) -> List[dict]:
