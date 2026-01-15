@@ -7,17 +7,19 @@ classification using a trained ML model (loaded from .pkl files).
 Workflow:
 1. Initialize webcam and MediaPipe hands via existing HandCapture.
 2. For each frame:
-   - Detect hand landmarks.
+   - Detect hand landmarks (uses only first detected hand).
    - Normalize to "Standard Hand" format (same as training pipeline).
-   - Flatten to 63-dim vector, scale with saved scaler, predict label.
+   - Extract features: 63-dim points + hit_order + chain_code + palm_angles.
+   - Scale with saved scaler, predict label.
    - Update UI with detected sign and confidence (if available).
 3. Provide start/stop controls and safe resource cleanup.
 
 Assumptions:
 - Model files exist at: models/asl_svm_model.pkl, models/scaler.pkl,
-  models/label_encoder.pkl.
+  models/label_encoder.pkl, models/feature_config.pkl.
 - Normalization matches training: normalize_hand_data (wrist-centered,
   3D scale, rotation-aligned).
+- Uses single hand (63 features), excludes trigger_distance.
 """
 
 import tkinter as tk
@@ -85,7 +87,6 @@ class ASLInferenceApp:
         self.max_hit_order_len = 100  # Default, will be loaded from config
         self.max_chain_code_len = 100  # Default, will be loaded from config
         self.max_palm_angles_len = 200  # Default, will be loaded from config
-        self.max_trigger_distance_len = 100  # Default, will be loaded from config
 
         # Smoothing buffer
         self.pred_buffer = deque(maxlen=SMOOTHING_WINDOW) if SMOOTHING_WINDOW > 0 else None
@@ -198,12 +199,10 @@ class ASLInferenceApp:
                 self.max_hit_order_len = feature_config.get("max_hit_order_len", 100)
                 self.max_chain_code_len = feature_config.get("max_chain_code_len", 100)
                 self.max_palm_angles_len = feature_config.get("max_palm_angles_len", 200)
-                self.max_trigger_distance_len = feature_config.get("max_trigger_distance_len", 100)
                 print(f"Feature config loaded:")
                 print(f"  - hit_order_len: {self.max_hit_order_len}")
                 print(f"  - chain_code_len: {self.max_chain_code_len}")
                 print(f"  - palm_angles_len: {self.max_palm_angles_len}")
-                print(f"  - trigger_distance_len: {self.max_trigger_distance_len}")
             else:
                 print("Warning: Feature config not found, using defaults")
             
@@ -279,28 +278,23 @@ class ASLInferenceApp:
                 # Update camera display first (non-blocking)
                 self._update_camera_canvas(annotated)
 
-                # Get hit_order, chain_code, palm_angles, and trigger_distance if available
+                # Get hit_order, chain_code, and palm_angles if available
                 hit_order = []
                 chain_code = []
                 palm_angles_left = []
                 palm_angles_right = []
-                trigger_distance_left = []
-                trigger_distance_right = []
                 
                 if self.grid_tracking_active:
                     hit_order = self.capture.get_hit_order() or []
                     chain_code = self.capture.get_chain_code() or []
                     palm_angles_left = self.capture.get_palm_angles_left() or []
                     palm_angles_right = self.capture.get_palm_angles_right() or []
-                    trigger_distance_left = self.capture.get_trigger_distance_left() or []
-                    trigger_distance_right = self.capture.get_trigger_distance_right() or []
                     self._update_grid_info()
 
                 # Then do prediction (may be slower, but won't block display)
                 prediction, confidence = self._predict_from_landmarks(
                     landmarks_list, hit_order, chain_code, 
-                    palm_angles_left, palm_angles_right,
-                    trigger_distance_left, trigger_distance_right
+                    palm_angles_left, palm_angles_right
                 )
                 self._update_prediction_display(prediction, confidence)
                 
@@ -318,11 +312,13 @@ class ASLInferenceApp:
         hit_order: List[int] = None, 
         chain_code: List[int] = None,
         palm_angles_left: List[tuple] = None,
-        palm_angles_right: List[tuple] = None,
-        trigger_distance_left: List[float] = None,
-        trigger_distance_right: List[float] = None
+        palm_angles_right: List[tuple] = None
     ) -> Tuple[str, Optional[float]]:
-        """Predict label from detected landmarks and all motion features."""
+        """
+        Predict label from detected landmarks and motion features.
+        
+        Uses only detected hand (single hand = 63 features), matching training pipeline.
+        """
         # Check if model is loaded
         if self.model is None:
             return "Model not loaded", None
@@ -333,40 +329,37 @@ class ASLInferenceApp:
             return "No hand detected", None
 
         try:
-            # Normalize and combine both hands (matching training: both hands = 126 features)
-            points_combined = []
+            # Use only detected hand (single hand = 63 features, matching training)
+            points_flat = None
             
-            # Process all detected hands
+            # Process first detected hand only
             for hand_data in landmarks_list:
                 landmarks = hand_data.get("landmarks", [])
                 if len(landmarks) == 21:
                     # Normalize using same training pipeline
                     normalized = normalize_hand_data(landmarks, apply_rotation=True)
                     if normalized and len(normalized) == 21:
-                        # Flatten to 63-d vector and add to combined
-                        flat = np.array(normalized, dtype=np.float32).flatten()
-                        points_combined.extend(flat.tolist())
+                        # Flatten to 63-d vector (single hand)
+                        points_flat = np.array(normalized, dtype=np.float32).flatten()
+                        break  # Use only first detected hand
             
-            # Pad to 126 features (both hands) if only one hand detected
-            if len(points_combined) < 126:
-                points_combined.extend([0.0] * (126 - len(points_combined)))
-            elif len(points_combined) > 126:
-                # Truncate if somehow more than both hands
-                points_combined = points_combined[:126]
-            
-            if len(points_combined) != 126:
-                print(f"Warning: Expected 126 features (both hands), got {len(points_combined)}")
+            if points_flat is None or len(points_flat) != 63:
+                print(f"Warning: Expected 63 features (single hand), got {len(points_flat) if points_flat is not None else 0}")
                 return "Feature size mismatch", None
             
-            # Extract features: points_flat + hit_order + chain_code + palm_angles + trigger_distance
+            # Pad to 63 features if needed (shouldn't happen, but safety check)
+            if len(points_flat) < 63:
+                points_flat = np.pad(points_flat, (0, 63 - len(points_flat)), mode='constant', constant_values=0.0)
+            elif len(points_flat) > 63:
+                points_flat = points_flat[:63]
+            
+            # Extract features: points_flat + hit_order + chain_code + palm_angles (NO trigger_distance)
             features = self._extract_features(
-                np.array(points_combined, dtype=np.float32),
+                points_flat,
                 hit_order or [],
                 chain_code or [],
                 palm_angles_left or [],
-                palm_angles_right or [],
-                trigger_distance_left or [],
-                trigger_distance_right or []
+                palm_angles_right or []
             )
 
             # Scale features if scaler available
@@ -416,21 +409,19 @@ class ASLInferenceApp:
         hit_order: List[int], 
         chain_code: List[int],
         palm_angles_left: List[tuple],
-        palm_angles_right: List[tuple],
-        trigger_distance_left: List[float],
-        trigger_distance_right: List[float]
+        palm_angles_right: List[tuple]
     ) -> np.ndarray:
         """
-        Extract features matching training pipeline: points_flat + hit_order + chain_code + palm_angles + trigger_distance.
+        Extract features matching training pipeline: points_flat + hit_order + chain_code + palm_angles.
+        
+        Uses single hand (63 features) and excludes trigger_distance.
         
         Args:
-            points_flat: 126-dimensional flattened hand landmarks (both hands)
+            points_flat: 63-dimensional flattened hand landmarks (single hand)
             hit_order: List of voxel indices hit during tracking
             chain_code: List of chain code direction indices
             palm_angles_left: List of (yaw, pitch, roll) tuples for left hand
             palm_angles_right: List of (yaw, pitch, roll) tuples for right hand
-            trigger_distance_left: List of trigger distances for left hand
-            trigger_distance_right: List of trigger distances for right hand
             
         Returns:
             Combined feature vector
@@ -462,23 +453,12 @@ class ASLInferenceApp:
         # Pad palm_angles_flat
         palm_angles_padded = list(palm_angles_flat[:self.max_palm_angles_len]) + [0.0] * (self.max_palm_angles_len - len(palm_angles_flat))
         
-        # Combine trigger_distance from both hands
-        trigger_distance = []
-        if trigger_distance_left:
-            trigger_distance.extend(trigger_distance_left)
-        if trigger_distance_right:
-            trigger_distance.extend(trigger_distance_right)
-        
-        # Pad trigger_distance
-        trigger_distance_padded = list(trigger_distance[:self.max_trigger_distance_len]) + [0.0] * (self.max_trigger_distance_len - len(trigger_distance))
-        
-        # Combine all features: points_flat + hit_order + chain_code + palm_angles + trigger_distance
+        # Combine all features: points_flat + hit_order + chain_code + palm_angles (NO trigger_distance)
         combined = np.concatenate([
             points_flat,
             np.array(hit_order_padded, dtype=np.float32),
             np.array(chain_code_padded, dtype=np.float32),
-            np.array(palm_angles_padded, dtype=np.float32),
-            np.array(trigger_distance_padded, dtype=np.float32)
+            np.array(palm_angles_padded, dtype=np.float32)
         ])
         
         return combined.reshape(1, -1)
