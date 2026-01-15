@@ -2,6 +2,14 @@
 User interface module using tkinter.
 
 This module provides a desktop GUI for the ASL dataset collection tool.
+
+Developer Notes:
+- `ASLDataCollectionUI` exposes callback setters for `on_start_capture`,
+  `on_stop_capture`, `on_save_sample`, `on_export_dataset`, and `on_clear_session`.
+- The UI handles drawing camera frames, showing hit counts, and displaying the
+  recent sample and collected samples table.
+- Keep UI logic separate from data processing: UI should only call into
+  `HandCapture`/`DatasetManager` via the callbacks set in `main.py`.
 """
 
 import tkinter as tk

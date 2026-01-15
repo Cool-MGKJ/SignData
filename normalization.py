@@ -3,6 +3,12 @@ Hand landmark normalization module.
 
 This module provides functions to normalize MediaPipe hand landmarks
 into a consistent 3D space with configurable spacing and point count.
+
+Developer Notes:
+- `normalize_hand_data()` is the canonical live-normalization used when saving samples.
+- `normalize_landmarks_to_3d_space()` provides an alternative normalization interface used
+  by other utilities in the codebase.
+- `standardize_features()` optionally wraps a scikit-learn `StandardScaler` when available.
 """
 
 import numpy as np

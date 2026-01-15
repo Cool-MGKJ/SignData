@@ -3,6 +3,14 @@ Main entry point for ASL Dataset Collection Tool.
 
 This application allows users to collect labelled ASL sign samples
 using MediaPipe hand tracking and a webcam.
+
+Developer Notes:
+- Coordinates the UI (`ASLDataCollectionUI`), capture (`HandCapture`),
+  normalization (`normalize_hand_data`), and dataset storage (`DatasetManager`).
+- Live normalization is applied when saving samples; there is no offline
+  normalization pass in this project.
+- Key runtime flow: initialize capture -> start video loop -> start/stop capture
+  -> save samples to in-memory dataset -> export via UI.
 """
 
 import tkinter as tk
@@ -40,6 +48,10 @@ class ASLDataCollectionApp:
         self.captured_landmarks = None
         self.captured_hit_order = None
         self.captured_chain_code = None  # Chain code captured during gesture
+        self.captured_palm_angles_left = None  # Palm angles for left hand
+        self.captured_palm_angles_right = None  # Palm angles for right hand
+        self.captured_trigger_distance_left = None  # Trigger distances for left hand
+        self.captured_trigger_distance_right = None  # Trigger distances for right hand
         self.last_known_landmarks = None  # Track last known hand posture during capture
         
         # Setup callbacks
@@ -98,6 +110,12 @@ class ASLDataCollectionApp:
         self.captured_hit_order = self.capture.get_hit_order()
         self.captured_chain_code = self.capture.get_chain_code()
         
+        # Get palm angles and trigger distances for both hands
+        self.captured_palm_angles_left = self.capture.get_palm_angles_left()
+        self.captured_palm_angles_right = self.capture.get_palm_angles_right()
+        self.captured_trigger_distance_left = self.capture.get_trigger_distance_left()
+        self.captured_trigger_distance_right = self.capture.get_trigger_distance_right()
+        
         # Reset grid tracking (so hits don't show after stop)
         # This clears the hit_grid so visualization shows no green points
         self.capture.stop_grid_tracking()
@@ -149,51 +167,73 @@ class ASLDataCollectionApp:
         Returns:
             True if successful, False otherwise
         """
-        # Allow saving even if no landmarks were captured
+        # Separate left and right hand points
+        points_left = []
+        points_right = []
+        
         if self.captured_landmarks is None or len(self.captured_landmarks) == 0:
-            # Save with empty points and hit order
-            normalized_points = []
-            hand_info = "none"
+            # No landmarks captured
+            points_left = []
+            points_right = []
         else:
             # Apply "Standard Hand" normalization when saving to dataset
             # This ensures consistent representation for PCA/clustering
-            hand_info = get_hand_info(self.captured_landmarks)
-            
-            # Normalize each hand to "Standard Hand" format (wrist at origin, unit scale, rotated)
-            normalized_points = []
             for hand_data in self.captured_landmarks:
                 landmarks = hand_data.get('landmarks', [])
+                handedness = hand_data.get('handedness', 'Unknown')
+                
+                # Debug: Print what we're processing
+                print(f"Processing hand: handedness={handedness}, num_landmarks={len(landmarks)}")
+                
                 if len(landmarks) == 21:
                     # Apply Standard Hand normalization
                     from normalization import normalize_hand_data
                     normalized = normalize_hand_data(landmarks, apply_rotation=True)
-                    normalized_points.extend(normalized)
-            
-            if not normalized_points:
-                normalized_points = []
-                hand_info = "none"
+                    
+                    # Debug: Print what we normalized
+                    print(f"Normalized {handedness} hand: {len(normalized)} points")
+                    
+                    # Store in appropriate left/right array
+                    if handedness == 'Left':
+                        points_left = normalized
+                    elif handedness == 'Right':
+                        points_right = normalized
+                    else:
+                        # Unknown handedness - try to store it somewhere
+                        print(f"WARNING: Unknown handedness '{handedness}', storing as right hand")
+                        if not points_right:  # If right not set, use this
+                            points_right = normalized
         
         hit_order = self.captured_hit_order if self.captured_hit_order is not None else []
         chain_code = self.captured_chain_code if self.captured_chain_code is not None else []
+        palm_angles_left = self.captured_palm_angles_left if self.captured_palm_angles_left is not None else []
+        palm_angles_right = self.captured_palm_angles_right if self.captured_palm_angles_right is not None else []
+        trigger_distance_left = self.captured_trigger_distance_left if self.captured_trigger_distance_left is not None else []
+        trigger_distance_right = self.captured_trigger_distance_right if self.captured_trigger_distance_right is not None else []
 
-        # Add to dataset with chain code
+        # Add to dataset with separated left/right points
         sample_id = self.dataset.add_sample(
             label=label,
-            normalized_points=normalized_points,
-            hand=hand_info,
+            points_left=points_left if points_left else None,
+            points_right=points_right if points_right else None,
             hit_order=hit_order,
-            chain_code=chain_code
+            chain_code=chain_code,
+            palm_angles_left=palm_angles_left,
+            palm_angles_right=palm_angles_right,
+            trigger_distance_left=trigger_distance_left,
+            trigger_distance_right=trigger_distance_right
         )
         
         # Debug output
-        print(f"Sample saved: ID={sample_id}, Label={label}, Points={len(normalized_points)}, Hit Order Length={len(hit_order)}")
+        print(f"Sample saved: ID={sample_id}, Label={label}, Points_L={len(points_left)}, Points_R={len(points_right)}, Hit Order Length={len(hit_order)}")
         
         # Update UI
+        total_points = len(points_left) + len(points_right)
         self.ui.add_sample_to_table(
             sample_id,
             label,
-            hand_info,
-            len(normalized_points)
+            "left/right",
+            total_points
         )
         self.ui.update_sample_count(self.dataset.get_sample_count())
         
@@ -205,6 +245,10 @@ class ASLDataCollectionApp:
         self.captured_frame = None
         self.captured_hit_order = None
         self.captured_chain_code = None
+        self.captured_palm_angles_left = None
+        self.captured_palm_angles_right = None
+        self.captured_trigger_distance_left = None
+        self.captured_trigger_distance_right = None
         
         return True
     

@@ -65,7 +65,7 @@ RF_MAX_DEPTH = None
 RF_RANDOM_STATE = RANDOM_STATE
 
 
-def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int, int]:
+def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int, int, int]:
     """
     Load samples from multiple JSON dataset files.
 
@@ -73,11 +73,12 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int,
         dataset_paths: List of paths to JSON dataset files
 
     Returns:
-        Tuple of (features_list, labels_list, max_hit_order_len, max_chain_code_len) where:
-        - features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code'
+        Tuple of (features_list, labels_list, max_hit_order_len, max_chain_code_len, max_palm_angles_len) where:
+        - features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code', 'palm_angles_flat', 'trigger_distance'
         - labels_list: List of string labels
         - max_hit_order_len: Maximum length of hit_order across all samples
         - max_chain_code_len: Maximum length of chain_code across all samples
+        - max_palm_angles_len: Maximum length of flattened palm_angles across all samples
 
     Raises:
         FileNotFoundError: If a dataset file doesn't exist
@@ -87,6 +88,7 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int,
     all_labels = []
     max_hit_order_len = 0
     max_chain_code_len = 0
+    max_palm_angles_len = 0
 
     for dataset_path in dataset_paths:
         if not os.path.exists(dataset_path):
@@ -97,7 +99,20 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int,
             with open(dataset_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            samples = data.get("samples", [])
+            # Handle both array format and object format
+            if isinstance(data, list):
+                # If data is a list, it might be [{"metadata": {...}, "samples": [...]}, ...]
+                samples = []
+                for item in data:
+                    if isinstance(item, dict) and "samples" in item:
+                        samples.extend(item.get("samples", []))
+                    elif isinstance(item, dict) and "label" in item:
+                        # Direct sample format
+                        samples.append(item)
+            else:
+                # Object format with "samples" key
+                samples = data.get("samples", [])
+            
             if not samples:
                 print(f"Warning: No samples found in {dataset_path}")
                 continue
@@ -109,50 +124,78 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int,
                     print(f"Warning: Sample missing label, skipping: {sample.get('id', 'unknown')}")
                     continue
 
-                # Extract points_flat (63 features: 21 landmarks × 3 coords)
-                points_flat = sample.get("points_flat")
-                if not points_flat:
-                    # Try to reconstruct from points array if available
-                    points = sample.get("points", [])
-                    if points and isinstance(points[0], dict):
-                        # Convert numbered format to flat format
-                        points_flat = []
-                        for point_dict in points:
+                # Extract points from numbered format (points_left/points_right or points)
+                points_flat = []
+                
+                # Try new format first: points_left and points_right
+                points_left = sample.get("points_left", [])
+                points_right = sample.get("points_right", [])
+                
+                if points_left or points_right:
+                    # Convert numbered format to flat format for both hands
+                    if points_left and isinstance(points_left[0], dict):
+                        for point_dict in points_left:
                             points_flat.extend([point_dict["x"], point_dict["y"], point_dict["z"]])
-                    else:
-                        print(f"Warning: Sample missing points_flat, skipping: ID={sample.get('id', 'unknown')}")
-                        continue
-
-                # Handle feature vector length
-                # Expected: 63 features (21 landmarks × 3 coords) for single hand
-                # If 126 features (42 landmarks), take first hand (first 63 features)
-                if len(points_flat) == 126:
-                    # Sample has both hands - use first hand only
-                    points_flat = points_flat[:63]
-                    print(
-                        f"Info: Sample ID={sample.get('id', 'unknown')} has both hands. "
-                        f"Using first hand (63 features)."
-                    )
-                elif len(points_flat) != 63:
-                    print(
-                        f"Warning: Sample has {len(points_flat)} features (expected 63 or 126), "
-                        f"skipping: ID={sample.get('id', 'unknown')}"
-                    )
+                    
+                    if points_right and isinstance(points_right[0], dict):
+                        for point_dict in points_right:
+                            points_flat.extend([point_dict["x"], point_dict["y"], point_dict["z"]])
+                else:
+                    # Try old format: points_flat or points
+                    points_flat = sample.get("points_flat")
+                    if not points_flat:
+                        points = sample.get("points", [])
+                        if points and isinstance(points[0], dict):
+                            # Convert numbered format to flat format
+                            points_flat = []
+                            for point_dict in points:
+                                points_flat.extend([point_dict["x"], point_dict["y"], point_dict["z"]])
+                
+                if not points_flat:
+                    print(f"Warning: Sample missing points, skipping: ID={sample.get('id', 'unknown')}")
                     continue
 
                 # Extract hit_order and chain_code
                 hit_order = sample.get("hit_order", [])
                 chain_code = sample.get("chain_code", [])
                 
+                # Extract palm_angles (pitch, yaw, roll) from both hands and flatten
+                palm_angles_left = sample.get("palm_angles_left", [])
+                palm_angles_right = sample.get("palm_angles_right", [])
+                
+                # Flatten all palm angles: [pitch, yaw, roll] for each entry
+                palm_angles_flat = []
+                if palm_angles_left:
+                    for angle_array in palm_angles_left:
+                        if isinstance(angle_array, list) and len(angle_array) == 3:
+                            palm_angles_flat.extend(angle_array)  # [pitch, yaw, roll]
+                
+                if palm_angles_right:
+                    for angle_array in palm_angles_right:
+                        if isinstance(angle_array, list) and len(angle_array) == 3:
+                            palm_angles_flat.extend(angle_array)  # [pitch, yaw, roll]
+                
+                # Extract trigger_distance from both hands and combine
+                trigger_distance_left = sample.get("trigger_distance_left", [])
+                trigger_distance_right = sample.get("trigger_distance_right", [])
+                trigger_distance = []
+                if trigger_distance_left:
+                    trigger_distance.extend(trigger_distance_left)
+                if trigger_distance_right:
+                    trigger_distance.extend(trigger_distance_right)
+                
                 # Track maximum lengths for padding
                 max_hit_order_len = max(max_hit_order_len, len(hit_order))
                 max_chain_code_len = max(max_chain_code_len, len(chain_code))
+                max_palm_angles_len = max(max_palm_angles_len, len(palm_angles_flat))
 
                 # Store features as dict for later padding
                 all_features.append({
                     "points_flat": points_flat,
                     "hit_order": hit_order,
-                    "chain_code": chain_code
+                    "chain_code": chain_code,
+                    "palm_angles_flat": palm_angles_flat,
+                    "trigger_distance": trigger_distance
                 })
                 all_labels.append(label)
 
@@ -174,23 +217,26 @@ def load_datasets(dataset_paths: List[str]) -> Tuple[List[dict], List[str], int,
     print(f"\nTotal samples loaded: {len(all_features)}")
     print(f"Max hit_order length: {max_hit_order_len}")
     print(f"Max chain_code length: {max_chain_code_len}")
-    return all_features, all_labels, max_hit_order_len, max_chain_code_len
+    print(f"Max palm_angles length: {max_palm_angles_len}")
+    return all_features, all_labels, max_hit_order_len, max_chain_code_len, max_palm_angles_len
 
 
 def prepare_features(
     features_list: List[dict], 
     labels_list: List[str],
     max_hit_order_len: int,
-    max_chain_code_len: int
+    max_chain_code_len: int,
+    max_palm_angles_len: int
 ) -> Tuple[np.ndarray, np.ndarray, StandardScaler, LabelEncoder]:
     """
     Prepare features and labels for training.
 
     Args:
-        features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code'
+        features_list: List of dicts with 'points_flat', 'hit_order', 'chain_code', 'palm_angles_flat', 'trigger_distance'
         labels_list: List of string labels
         max_hit_order_len: Maximum length for hit_order padding
         max_chain_code_len: Maximum length for chain_code padding
+        max_palm_angles_len: Maximum length for palm_angles_flat padding
 
     Returns:
         Tuple of (X_scaled, y_encoded, scaler, label_encoder) where:
@@ -201,11 +247,35 @@ def prepare_features(
     """
     # Pad features to consistent length
     padded_features = []
+    max_trigger_distance_len = 0
+    max_points_len = 0
+    
+    # First pass: find max lengths
+    for feat_dict in features_list:
+        points_flat = feat_dict["points_flat"]
+        trigger_distance = feat_dict.get("trigger_distance", [])
+        max_points_len = max(max_points_len, len(points_flat))
+        max_trigger_distance_len = max(max_trigger_distance_len, len(trigger_distance))
+    
+    # Standardize to 126 features for points (both hands: 21 landmarks × 3 coords × 2 hands)
+    POINTS_FEATURES = 126  # Both hands
     
     for feat_dict in features_list:
         points_flat = feat_dict["points_flat"]
         hit_order = feat_dict.get("hit_order", [])
         chain_code = feat_dict.get("chain_code", [])
+        palm_angles_flat = feat_dict.get("palm_angles_flat", [])
+        trigger_distance = feat_dict.get("trigger_distance", [])
+        
+        # Pad/truncate points_flat to fixed size (126 for both hands)
+        if len(points_flat) < POINTS_FEATURES:
+            # Pad with zeros if only one hand
+            points_padded = list(points_flat) + [0.0] * (POINTS_FEATURES - len(points_flat))
+        elif len(points_flat) > POINTS_FEATURES:
+            # Truncate if somehow more than both hands
+            points_padded = list(points_flat[:POINTS_FEATURES])
+        else:
+            points_padded = list(points_flat)
         
         # Pad hit_order
         hit_order_padded = list(hit_order[:max_hit_order_len]) + [0] * (max_hit_order_len - len(hit_order))
@@ -213,8 +283,14 @@ def prepare_features(
         # Pad chain_code
         chain_code_padded = list(chain_code[:max_chain_code_len]) + [0] * (max_chain_code_len - len(chain_code))
         
-        # Combine: points_flat + hit_order + chain_code
-        combined = list(points_flat) + hit_order_padded + chain_code_padded
+        # Pad palm_angles_flat
+        palm_angles_padded = list(palm_angles_flat[:max_palm_angles_len]) + [0.0] * (max_palm_angles_len - len(palm_angles_flat))
+        
+        # Pad trigger_distance
+        trigger_distance_padded = list(trigger_distance[:max_trigger_distance_len]) + [0.0] * (max_trigger_distance_len - len(trigger_distance))
+        
+        # Combine: points_flat + hit_order + chain_code + palm_angles_flat + trigger_distance
+        combined = points_padded + hit_order_padded + chain_code_padded + palm_angles_padded + trigger_distance_padded
         padded_features.append(combined)
     
     # Convert to numpy arrays
@@ -230,9 +306,11 @@ def prepare_features(
     X_scaled = scaler.fit_transform(X)
 
     print(f"\nFeature matrix shape: {X_scaled.shape}")
-    print(f"  - Points (landmarks): 63")
+    print(f"  - Points (landmarks, both hands): 126 (21 × 3 × 2)")
     print(f"  - Hit order: {max_hit_order_len}")
     print(f"  - Chain code: {max_chain_code_len}")
+    print(f"  - Palm angles (flattened): {max_palm_angles_len}")
+    print(f"  - Trigger distance: {max_trigger_distance_len}")
     print(f"  - Total features: {X_scaled.shape[1]}")
     print(f"Number of classes: {len(label_encoder.classes_)}")
     print(f"Classes: {list(label_encoder.classes_)}")
@@ -408,6 +486,8 @@ def save_artifacts(
     label_encoder: LabelEncoder,
     max_hit_order_len: int,
     max_chain_code_len: int,
+    max_palm_angles_len: int,
+    max_trigger_distance_len: int,
 ) -> None:
     """
     Save trained models and preprocessing artifacts to disk.
@@ -415,10 +495,13 @@ def save_artifacts(
     Args:
         svm_model: Trained SVM model
         rf_model: Trained Random Forest model
+        gb_model: Trained Gradient Boosting model
         scaler: Fitted StandardScaler
         label_encoder: Fitted LabelEncoder
         max_hit_order_len: Maximum hit_order length for feature extraction
         max_chain_code_len: Maximum chain_code length for feature extraction
+        max_palm_angles_len: Maximum palm_angles_flat length for feature extraction
+        max_trigger_distance_len: Maximum trigger_distance length for feature extraction
     """
     print("\n" + "=" * 60)
     print("Saving models and artifacts...")
@@ -448,6 +531,8 @@ def save_artifacts(
     feature_config = {
         "max_hit_order_len": max_hit_order_len,
         "max_chain_code_len": max_chain_code_len,
+        "max_palm_angles_len": max_palm_angles_len,
+        "max_trigger_distance_len": max_trigger_distance_len,
     }
     joblib.dump(feature_config, FEATURE_CONFIG_PATH)
     print(f"Saved feature config to: {FEATURE_CONFIG_PATH}")
@@ -490,7 +575,7 @@ def main(dataset_paths: List[str] = None) -> None:
 
     # Step 1: Load datasets
     print("\nStep 1: Loading datasets...")
-    features_list, labels_list, max_hit_order_len, max_chain_code_len = load_datasets(dataset_paths)
+    features_list, labels_list, max_hit_order_len, max_chain_code_len, max_palm_angles_len = load_datasets(dataset_paths)
 
     # Print class distribution
     print_class_distribution(labels_list)
@@ -498,7 +583,7 @@ def main(dataset_paths: List[str] = None) -> None:
     # Step 2: Prepare features
     print("\nStep 2: Preparing features...")
     X_scaled, y_encoded, scaler, label_encoder = prepare_features(
-        features_list, labels_list, max_hit_order_len, max_chain_code_len
+        features_list, labels_list, max_hit_order_len, max_chain_code_len, max_palm_angles_len
     )
 
     # Step 3: Split data
@@ -548,23 +633,18 @@ def main(dataset_paths: List[str] = None) -> None:
     print(f"RF F1-score:   {rf_metrics['f1_score']:.4f}")
     print(f"GB F1-score:   {gb_metrics['f1_score']:.4f}")
 
-    # Pick best by accuracy, then F1, tie-breaker preference: SVM > Gradient Boosting > Random Forest
-    candidates = [
-        ("SVM", svm_metrics),
-        ("Gradient Boosting", gb_metrics),
-        ("Random Forest", rf_metrics),
-    ]
-    preference_order = {"SVM": 0, "Gradient Boosting": 1, "Random Forest": 2}
-    candidates_sorted = sorted(
-        candidates,
-        key=lambda item: (item[1]["accuracy"], item[1]["f1_score"], -preference_order[item[0]]),
-        reverse=True,
-    )
-    best_model = candidates_sorted[0][0]
-    print(f"\n[+] Best performing model: {best_model}")
+    # User specified SVM as best model
+    print(f"\n[+] Best performing model: SVM (as specified)")
+    best_model = "SVM"
+
+    # Find max trigger_distance length for saving
+    max_trigger_distance_len = 0
+    for feat_dict in features_list:
+        trigger_distance = feat_dict.get("trigger_distance", [])
+        max_trigger_distance_len = max(max_trigger_distance_len, len(trigger_distance))
 
     # Step 7: Save artifacts
-    save_artifacts(svm_model, rf_model, gb_model, scaler, label_encoder, max_hit_order_len, max_chain_code_len)
+    save_artifacts(svm_model, rf_model, gb_model, scaler, label_encoder, max_hit_order_len, max_chain_code_len, max_palm_angles_len, max_trigger_distance_len)
 
     print("\n" + "=" * 60)
     print("Training pipeline completed successfully!")

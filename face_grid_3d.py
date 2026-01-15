@@ -86,16 +86,16 @@ class FaceGrid3D:
     """
     Tracks a face-centered 3D voxel grid using MediaPipe FaceMesh z-depth.
     
-    **2-Layer System (Face Layer + Forward Layer):**
-    - Layer 0 "Face Layer" (z_idx=0, voxels 0-79): Hand at or behind face plane (relative_z >= 0)
-    - Layer 1 "Forward Layer" (z_idx=1, voxels 80-159): Hand extended toward camera (relative_z < 0)
+    **2-Layer System (Face → Layer 0 → Layer 1 → Camera):**
+    - Layer 0 (z_idx=0, voxels 0-79): Closest to face (relative_z >= 0, hand toward/at face) - inner layer
+    - Layer 1 (z_idx=1, voxels 80-159): Closest to camera (relative_z < 0, hand extended toward camera) - outer layer
     
     **Z-Axis Convention (MediaPipe):**
     - Negative z = closer to camera
     - Positive z = farther from camera
     - relative_z = (raw_z - face_z_reference) / reference_length
-    - negative relative_z → hand extended forward → Layer 1 (near camera)
-    - positive relative_z → hand near/behind face → Layer 0 (near face)
+    - positive relative_z → hand at/behind face → Layer 0 (inner layer)
+    - negative relative_z → hand extended forward → Layer 1 (outer layer)
     
     **Voxel Indexing:**
     - Order: [z, row, col] - z (depth layer) is fastest, then row (y), then col (x)
@@ -123,7 +123,7 @@ class FaceGrid3D:
         self,
         breadth: int = 8,  # x-axis (width)
         length: int = 10,   # y-axis (height)
-        depth_layers: int = 3,  # z-axis (depth, 3 layers: near, middle, far)
+        depth_layers: int = 2,  # z-axis (depth, 2 layers: face and camera)
         depth_span_factor: float = 2.4,  # How many spacing steps span forward/back
         hit_radius_norm: float = 0.12,  # Hit detection radius in normalized 3D space (increased for better triggering)
         track_landmark_paths: bool = True,
@@ -135,7 +135,7 @@ class FaceGrid3D:
         Args:
             breadth: Number of voxels horizontally (x-axis, default: 8)
             length: Number of voxels vertically (y-axis, default: 10)
-            depth_layers: Number of depth layers (z-axis, default: 3)
+            depth_layers: Number of depth layers (z-axis, default: 2)
             depth_span_factor: Multiplier for depth layer span (default: 2.4)
             hit_radius_norm: Hit detection radius in normalized 3D coordinates (default: 0.06)
             track_landmark_paths: If True, record ordered paths per landmark (default: True)
@@ -205,11 +205,30 @@ class FaceGrid3D:
         self.reference_length = None  # Shoulder-to-shoulder or wrist-to-elbow distance
         self.face_z_reference = None  # Face plane Z reference (nose or mid-shoulders Z)
         self.last_pose_results = None  # Store last pose detection results
+        self.last_nose_position = None  # Store last detected nose position (x, y, z) in normalized coordinates
         
         # 26-directional chain code validation system
         self.current_gesture_chain = []  # List of direction indices (0-25) representing movement trajectory
         self.jitter_threshold = 0.02  # Minimum movement distance to record a direction change
         self.is_capturing_chain = False  # Flag to track if chain code should be updated (only during capture)
+        
+        # Palm angle tracking system (yaw, pitch, roll for both hands)
+        self.palm_angles_left = []  # List of [yaw, pitch, roll] for left hand
+        self.palm_angles_right = []  # List of [yaw, pitch, roll] for right hand
+        self.initial_palm_angles_left = None  # Initial angles for left hand
+        self.initial_palm_angles_right = None  # Initial angles for right hand
+        self.last_recorded_angles_left = None  # Last recorded angles for left hand
+        self.last_recorded_angles_right = None  # Last recorded angles for right hand
+        self.angle_change_threshold = 5.0  # Degrees - record when any angle changes by this amount
+        
+        # Trigger distance tracking (distance from trigger point to nose)
+        self.trigger_distance_left = []  # List of distances for left hand
+        self.trigger_distance_right = []  # List of distances for right hand
+        self.initial_distance_left = None  # Initial distance for left hand
+        self.initial_distance_right = None  # Initial distance for right hand
+        self.last_recorded_distance_left = None  # Last recorded distance for left hand
+        self.last_recorded_distance_right = None  # Last recorded distance for right hand
+        self.distance_change_threshold = 0.05  # Normalized units - record when distance changes by this amount
     
     def reset_hit_tracking(self):
         """Reset hit tracking and paths (call at start of new capture)."""
@@ -228,6 +247,20 @@ class FaceGrid3D:
         # Reset chain code tracking
         self.current_gesture_chain = []
         self.is_capturing_chain = False
+        # Reset palm angle tracking
+        self.palm_angles_left = []
+        self.palm_angles_right = []
+        self.initial_palm_angles_left = None
+        self.initial_palm_angles_right = None
+        self.last_recorded_angles_left = None
+        self.last_recorded_angles_right = None
+        # Reset trigger distance tracking
+        self.trigger_distance_left = []
+        self.trigger_distance_right = []
+        self.initial_distance_left = None
+        self.initial_distance_right = None
+        self.last_recorded_distance_left = None
+        self.last_recorded_distance_right = None
     
     def start_chain_capture(self):
         """Start capturing chain code (call when capture starts)."""
@@ -466,6 +499,114 @@ class FaceGrid3D:
         if len(self.current_gesture_chain) == 0 or self.current_gesture_chain[-1] != best_direction_idx:
             self.current_gesture_chain.append(best_direction_idx)
     
+    def calculate_palm_angles(self, hand_landmarks_list) -> Optional[tuple]:
+        """
+        Calculate yaw, pitch, and roll angles from hand landmarks.
+        
+        Uses the wrist as the origin and calculates 3D orientation based on
+        the positions of index_mcp, middle_mcp, and pinky_mcp landmarks.
+        
+        Hand landmarks from MediaPipe Hand (21 points):
+        - 0: wrist (origin)
+        - 5: index_mcp
+        - 9: middle_mcp
+        - 17: pinky_mcp
+        
+        Args:
+            hand_landmarks_list: List of hand landmarks with x, y, z coordinates
+            
+        Returns:
+            Tuple of (yaw, pitch, roll) in degrees, or None if invalid
+        """
+        try:
+            if not hand_landmarks_list or len(hand_landmarks_list) < 18:
+                return None
+            
+            # Helper function to extract coordinates from landmark (handles both tuples and objects)
+            def get_coords(landmark):
+                if hasattr(landmark, 'x'):
+                    return np.array([landmark.x, landmark.y, landmark.z])
+                elif isinstance(landmark, (list, tuple)):
+                    return np.array(landmark[:3])
+                else:
+                    return None
+            
+            # Extract key landmarks (MediaPipe Hand)
+            wrist = get_coords(hand_landmarks_list[0])
+            index_mcp = get_coords(hand_landmarks_list[5])
+            middle_mcp = get_coords(hand_landmarks_list[9])
+            pinky_mcp = get_coords(hand_landmarks_list[17])
+            
+            # Check if any coordinate extraction failed
+            if wrist is None or index_mcp is None or middle_mcp is None or pinky_mcp is None:
+                return None
+            
+            # Create vectors from wrist to each finger base
+            v_index = index_mcp - wrist
+            v_middle = middle_mcp - wrist
+            v_pinky = pinky_mcp - wrist
+            
+            # Normalize vectors
+            v_index_norm = v_index / (np.linalg.norm(v_index) + 1e-6)
+            v_middle_norm = v_middle / (np.linalg.norm(v_middle) + 1e-6)
+            
+            # Calculate palm normal (cross product of two vectors)
+            palm_normal = np.cross(v_index_norm, v_middle_norm)
+            palm_normal_norm = palm_normal / (np.linalg.norm(palm_normal) + 1e-6)
+            
+            # Palm forward direction (average of finger directions)
+            palm_forward = (v_index_norm + v_middle_norm) / 2
+            palm_forward_norm = palm_forward / (np.linalg.norm(palm_forward) + 1e-6)
+            
+            # Palm right direction (perpendicular to forward and normal)
+            palm_right = np.cross(palm_forward_norm, palm_normal_norm)
+            palm_right_norm = palm_right / (np.linalg.norm(palm_right) + 1e-6)
+            
+            # Create rotation matrix from palm orientation
+            # The coordinate frame is: forward, right, normal (actually -normal for hand convention)
+            palm_up = -palm_normal_norm
+            
+            # Extract Euler angles from orientation vectors
+            # Yaw: rotation around up axis (z) - angle in xy plane
+            yaw = np.degrees(np.arctan2(palm_right_norm[1], palm_right_norm[0]))
+            
+            # Pitch: rotation around right axis - angle looking up/down
+            pitch = np.degrees(np.arcsin(np.clip(-palm_forward_norm[2], -1, 1)))
+            
+            # Roll: rotation around forward axis - twist
+            roll = np.degrees(np.arctan2(palm_up[0], palm_up[1]))
+            
+            return (yaw, pitch, roll)
+        
+        except Exception as e:
+            return None
+    
+    def calculate_trigger_distance(self, trigger_point: np.ndarray, nose_position: np.ndarray) -> float:
+        """
+        Calculate Euclidean 3D distance from trigger point to nose tip.
+        
+        Both positions should be in normalized coordinates (as used in the voxel grid).
+        
+        Args:
+            trigger_point: [x, y, z] trigger point from palm center
+            nose_position: [x, y, z] nose tip position from Face Mesh landmark 4
+            
+        Returns:
+            Euclidean distance in normalized units
+        """
+        try:
+            if trigger_point is None or nose_position is None:
+                return 0.0
+            
+            trigger = np.array(trigger_point)
+            nose = np.array(nose_position)
+            
+            # Calculate Euclidean distance
+            distance = np.linalg.norm(nose - trigger)
+            return float(distance)
+        
+        except Exception as e:
+            return 0.0
 
     
     def calculate_reference_length_from_pose(self, pose_results) -> Optional[float]:
@@ -656,6 +797,9 @@ class FaceGrid3D:
         
         # Store grid center z for reference - this follows head depth movement
         self.grid_center_z = nose_depth
+        
+        # Store nose position in normalized coordinates for distance tracking
+        self.last_nose_position = (nose_tip.x, nose_tip.y, nose_depth)
         
         # Calculate and store face Z reference (zero-point calibration)
         face_z_ref = self.calculate_face_z_reference(face_landmarks)
@@ -909,6 +1053,10 @@ class FaceGrid3D:
             if len(landmarks) < 21:
                 continue
             
+            # Determine if left or right hand
+            is_left_hand = hand_data.get('handedness', 'Right').lower() == 'left'
+            hand_side = 'left' if is_left_hand else 'right'
+            
             # Calculate single palm trigger point based on finger spread
             trigger_point = self.calculate_palm_trigger_point(landmarks)
             
@@ -934,13 +1082,13 @@ class FaceGrid3D:
             
             # Determine layer based on dynamic depth scaling (relative_z)
             if relative_z is not None:
-                # Dynamic Layer Switching:
-                # Layer 0 (Face Layer): relative_z >= 0 (hand at or behind face)
-                # Layer 1 (Forward Layer): relative_z < 0 (hand extended toward camera)
+                # Dynamic Layer Switching based on hand position:
+                # Layer 0 (z_idx=0): relative_z >= 0 (hand at/approaching face) - inner layer
+                # Layer 1 (z_idx=1): relative_z < 0 (hand extended toward camera) - outer layer
                 if relative_z < 0:
-                    matching_layer_idx = 1  # Forward Layer (near camera)
+                    matching_layer_idx = 1  # Layer 1 (outer, z_idx=1, near camera)
                 else:
-                    matching_layer_idx = 0  # Face Layer (near face)
+                    matching_layer_idx = 0  # Layer 0 (inner, z_idx=0, near face)
             else:
                 # No valid reference data yet; skip this hand
                 continue
@@ -984,6 +1132,78 @@ class FaceGrid3D:
                     
                     # Calculate chain code direction for trajectory validation
                     self._update_chain_code(nearest_voxel_idx)
+            
+            # Track palm angles for this hand
+            palm_angles = self.calculate_palm_angles(landmarks)
+            if palm_angles is not None:
+                yaw, pitch, roll = palm_angles
+                
+                if is_left_hand:
+                    # Record initial angles on first frame
+                    if self.initial_palm_angles_left is None:
+                        self.initial_palm_angles_left = palm_angles
+                        self.last_recorded_angles_left = palm_angles
+                    else:
+                        # Check if angle change exceeds threshold
+                        last_y, last_p, last_r = self.last_recorded_angles_left
+                        yaw_change = abs(yaw - last_y)
+                        pitch_change = abs(pitch - last_p)
+                        roll_change = abs(roll - last_r)
+                        
+                        # Record if any angle changed significantly
+                        if (yaw_change > self.angle_change_threshold or
+                            pitch_change > self.angle_change_threshold or
+                            roll_change > self.angle_change_threshold):
+                            self.palm_angles_left.append(palm_angles)
+                            self.last_recorded_angles_left = palm_angles
+                else:
+                    # Right hand
+                    if self.initial_palm_angles_right is None:
+                        self.initial_palm_angles_right = palm_angles
+                        self.last_recorded_angles_right = palm_angles
+                    else:
+                        # Check if angle change exceeds threshold
+                        last_y, last_p, last_r = self.last_recorded_angles_right
+                        yaw_change = abs(yaw - last_y)
+                        pitch_change = abs(pitch - last_p)
+                        roll_change = abs(roll - last_r)
+                        
+                        # Record if any angle changed significantly
+                        if (yaw_change > self.angle_change_threshold or
+                            pitch_change > self.angle_change_threshold or
+                            roll_change > self.angle_change_threshold):
+                            self.palm_angles_right.append(palm_angles)
+                            self.last_recorded_angles_right = palm_angles
+            
+            # Track trigger distance from nose
+            nose_position = self.get_nose_position()
+            if nose_position is not None:
+                trigger_distance = self.calculate_trigger_distance(np.array(trigger_point), np.array(nose_position))
+                
+                if is_left_hand:
+                    # Record initial distance on first frame
+                    if self.initial_distance_left is None:
+                        self.initial_distance_left = trigger_distance
+                        self.last_recorded_distance_left = trigger_distance
+                    else:
+                        # Check if distance change exceeds threshold
+                        distance_change = abs(trigger_distance - self.last_recorded_distance_left)
+                        
+                        if distance_change > self.distance_change_threshold:
+                            self.trigger_distance_left.append(trigger_distance)
+                            self.last_recorded_distance_left = trigger_distance
+                else:
+                    # Right hand
+                    if self.initial_distance_right is None:
+                        self.initial_distance_right = trigger_distance
+                        self.last_recorded_distance_right = trigger_distance
+                    else:
+                        # Check if distance change exceeds threshold
+                        distance_change = abs(trigger_distance - self.last_recorded_distance_right)
+                        
+                        if distance_change > self.distance_change_threshold:
+                            self.trigger_distance_right.append(trigger_distance)
+                            self.last_recorded_distance_right = trigger_distance
     
     def draw_grid(
         self,
@@ -1029,13 +1249,14 @@ class FaceGrid3D:
         # Sort by z-depth (farthest first, so nearer voxels overlay)
         voxel_draw_list.sort(key=lambda x: x[3], reverse=True)
         
-        # Colors for different depth layers (near to far) - more distinguishable
+        # Colors for different depth layers
+        # Layer 0 (z_idx=0, face): green when triggered, dim green normally
+        # Layer 1 (z_idx=1, camera): red when triggered, dim red normally
         layer_colors = [
-            np.array((0, 255, 0)),      # Near layer - bright green
-            np.array((0, 255, 255)),    # Middle layer - bright yellow
-            np.array((255, 0, 255)),    # Far layer - bright magenta
+            np.array((0, 255, 0)),      # Layer 0 (z_idx=0, face) - green in BGR
+            np.array((0, 0, 255)),      # Layer 1 (z_idx=1, camera) - red in BGR
         ]
-        # Extend colors if more than 3 layers
+        # Extend colors if more than 2 layers
         while len(layer_colors) < self.depth_layers:
             layer_colors.append(np.array((255, 255, 0)))  # Default bright cyan for extra layers
 
@@ -1049,21 +1270,19 @@ class FaceGrid3D:
             base_color = layer_colors[min(z_idx, len(layer_colors) - 1)]
             
             if show_hits and is_hit:
-                # Layer 1 (z_idx=1, near camera) should be bright red when triggered
-                if z_idx == 1:  # Layer 1 (near camera, points 80-159)
+                # Layer 0 (z_idx=0, face) bright green; Layer 1 (z_idx=1, camera) bright red when triggered
+                if z_idx == 0:  # Layer 0 (face, points 0-79)
+                    color = (0, 255, 0)  # Bright green in BGR format
+                    brightness = 1.0
+                    base_radius = 8  # Larger radius for Layer 0 to make it more visible
+                    radius = max(6, int(base_radius * (0.9 + layer_depth_factor * 0.1)))
+                else:  # Layer 1 (camera, points 80-159)
                     color = (0, 0, 255)  # Bright red in BGR format
                     brightness = 1.0
-                    base_radius = 8  # Larger radius for Layer 1 to make it more visible
+                    base_radius = 8  # Larger radius for Layer 1 when triggered
                     radius = max(6, int(base_radius * (0.9 + layer_depth_factor * 0.1)))
-                else:
-                    # Bright color for hit voxels in other layers, larger for nearer layers
-                    brightness = 0.8 + layer_depth_factor * 0.2
-                    color_vec = np.clip(base_color * brightness / 255.0, 0, 1)
-                    color = tuple(int(c * 255) for c in color_vec)
-                    base_radius = 6
-                    radius = max(4, int(base_radius * (0.8 + layer_depth_factor * 0.4)))
             else:
-                # Dimmer color for unhit voxels, smaller for farther layers
+                # Dimmer color for unhit voxels: dim red for Layer 1, dim green for Layer 0
                 brightness = 0.4 + layer_depth_factor * 0.3
                 color_vec = base_color * brightness / 255.0
                 color = tuple(int(c * 255) for c in np.clip(color_vec, 0, 1))
@@ -1190,6 +1409,51 @@ class FaceGrid3D:
         )
         
         return annotated_frame
+    
+    # Getter methods for palm angle and distance tracking
+    def get_nose_position(self) -> Optional[tuple]:
+        """
+        Get the current nose position in normalized coordinates.
+        
+        Returns:
+            Tuple of (x, y, z) in normalized coordinates, or None if not available
+        """
+        return self.last_nose_position
+    def get_palm_angles_left(self) -> List[tuple]:
+        """
+        Get recorded palm angle changes for left hand.
+        
+        Returns:
+            List of (yaw, pitch, roll) tuples recorded when angle change exceeded threshold
+        """
+        return self.palm_angles_left.copy()
+    
+    def get_palm_angles_right(self) -> List[tuple]:
+        """
+        Get recorded palm angle changes for right hand.
+        
+        Returns:
+            List of (yaw, pitch, roll) tuples recorded when angle change exceeded threshold
+        """
+        return self.palm_angles_right.copy()
+    
+    def get_trigger_distance_left(self) -> List[float]:
+        """
+        Get recorded trigger distance changes for left hand.
+        
+        Returns:
+            List of distances recorded when distance change exceeded threshold
+        """
+        return self.trigger_distance_left.copy()
+    
+    def get_trigger_distance_right(self) -> List[float]:
+        """
+        Get recorded trigger distance changes for right hand.
+        
+        Returns:
+            List of distances recorded when distance change exceeded threshold
+        """
+        return self.trigger_distance_right.copy()
     
     def release(self):
         """Release MediaPipe Face Mesh resources."""

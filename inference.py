@@ -24,6 +24,7 @@ import tkinter as tk
 from collections import Counter, deque
 from pathlib import Path
 from typing import List, Optional, Tuple
+from time import time
 
 import cv2
 import joblib
@@ -45,6 +46,7 @@ STATUS_FONT = ("Arial", 12, "bold")
 # Inference configuration
 CONFIDENCE_THRESHOLD = 0.5  # Detection fires when confidence >= 0.5
 SMOOTHING_WINDOW = 8  # set to 0 to disable majority-vote smoothing
+RESET_DELAY = 1.0  # Seconds to wait after first sign detection before reset
 MODEL_PATH = Path("models/asl_svm_model.pkl")
 SCALER_PATH = Path("models/scaler.pkl")
 ENCODER_PATH = Path("models/label_encoder.pkl")
@@ -82,9 +84,14 @@ class ASLInferenceApp:
         self.label_encoder = None
         self.max_hit_order_len = 100  # Default, will be loaded from config
         self.max_chain_code_len = 100  # Default, will be loaded from config
+        self.max_palm_angles_len = 200  # Default, will be loaded from config
+        self.max_trigger_distance_len = 100  # Default, will be loaded from config
 
         # Smoothing buffer
         self.pred_buffer = deque(maxlen=SMOOTHING_WINDOW) if SMOOTHING_WINDOW > 0 else None
+        
+        # Auto-reset tracking
+        self.first_detection_time: Optional[float] = None
 
         self._build_ui()
         self._load_models()
@@ -190,7 +197,13 @@ class ASLInferenceApp:
                 feature_config = joblib.load(FEATURE_CONFIG_PATH)
                 self.max_hit_order_len = feature_config.get("max_hit_order_len", 100)
                 self.max_chain_code_len = feature_config.get("max_chain_code_len", 100)
-                print(f"Feature config loaded: hit_order_len={self.max_hit_order_len}, chain_code_len={self.max_chain_code_len}")
+                self.max_palm_angles_len = feature_config.get("max_palm_angles_len", 200)
+                self.max_trigger_distance_len = feature_config.get("max_trigger_distance_len", 100)
+                print(f"Feature config loaded:")
+                print(f"  - hit_order_len: {self.max_hit_order_len}")
+                print(f"  - chain_code_len: {self.max_chain_code_len}")
+                print(f"  - palm_angles_len: {self.max_palm_angles_len}")
+                print(f"  - trigger_distance_len: {self.max_trigger_distance_len}")
             else:
                 print("Warning: Feature config not found, using defaults")
             
@@ -241,6 +254,8 @@ class ASLInferenceApp:
         self.hit_count_label.config(text="Hit Count: 0/160")
         self.voxel_path_label.config(text="[]")
         self.chain_code_label.config(text="[]")
+        # Reset auto-reset tracking
+        self.first_detection_time = None
         if self.capture:
             self.capture.release()
             self.capture = None
@@ -264,19 +279,33 @@ class ASLInferenceApp:
                 # Update camera display first (non-blocking)
                 self._update_camera_canvas(annotated)
 
-                # Get hit_order and chain_code if available
+                # Get hit_order, chain_code, palm_angles, and trigger_distance if available
                 hit_order = []
                 chain_code = []
+                palm_angles_left = []
+                palm_angles_right = []
+                trigger_distance_left = []
+                trigger_distance_right = []
+                
                 if self.grid_tracking_active:
                     hit_order = self.capture.get_hit_order() or []
                     chain_code = self.capture.get_chain_code() or []
+                    palm_angles_left = self.capture.get_palm_angles_left() or []
+                    palm_angles_right = self.capture.get_palm_angles_right() or []
+                    trigger_distance_left = self.capture.get_trigger_distance_left() or []
+                    trigger_distance_right = self.capture.get_trigger_distance_right() or []
                     self._update_grid_info()
 
                 # Then do prediction (may be slower, but won't block display)
                 prediction, confidence = self._predict_from_landmarks(
-                    landmarks_list, hit_order, chain_code
+                    landmarks_list, hit_order, chain_code, 
+                    palm_angles_left, palm_angles_right,
+                    trigger_distance_left, trigger_distance_right
                 )
                 self._update_prediction_display(prediction, confidence)
+                
+                # Check for auto-reset condition
+                self._check_auto_reset(prediction, confidence)
         except Exception as e:
             # Log error but don't crash - keep loop running
             print(f"Error in update loop: {e}")
@@ -284,9 +313,16 @@ class ASLInferenceApp:
         self.root.after(30, self._update_loop)
 
     def _predict_from_landmarks(
-        self, landmarks_list: List[dict], hit_order: List[int] = None, chain_code: List[int] = None
+        self, 
+        landmarks_list: List[dict], 
+        hit_order: List[int] = None, 
+        chain_code: List[int] = None,
+        palm_angles_left: List[tuple] = None,
+        palm_angles_right: List[tuple] = None,
+        trigger_distance_left: List[float] = None,
+        trigger_distance_right: List[float] = None
     ) -> Tuple[str, Optional[float]]:
-        """Predict label from detected landmarks, hit_order, and chain_code."""
+        """Predict label from detected landmarks and all motion features."""
         # Check if model is loaded
         if self.model is None:
             return "Model not loaded", None
@@ -297,25 +333,41 @@ class ASLInferenceApp:
             return "No hand detected", None
 
         try:
-            # Use first detected hand
-            hand = landmarks_list[0]
-            landmarks = hand.get("landmarks", [])
-            if len(landmarks) != 21:
-                return "No hand detected", None
-
-            # Normalize using same training pipeline
-            normalized = normalize_hand_data(landmarks, apply_rotation=True)
-            if not normalized or len(normalized) != 21:
-                return "No hand detected", None
-
-            # Flatten to 63-d vector
-            flat = np.array(normalized, dtype=np.float32).flatten()
-            if len(flat) != 63:
-                print(f"Warning: Expected 63 features, got {len(flat)}")
+            # Normalize and combine both hands (matching training: both hands = 126 features)
+            points_combined = []
+            
+            # Process all detected hands
+            for hand_data in landmarks_list:
+                landmarks = hand_data.get("landmarks", [])
+                if len(landmarks) == 21:
+                    # Normalize using same training pipeline
+                    normalized = normalize_hand_data(landmarks, apply_rotation=True)
+                    if normalized and len(normalized) == 21:
+                        # Flatten to 63-d vector and add to combined
+                        flat = np.array(normalized, dtype=np.float32).flatten()
+                        points_combined.extend(flat.tolist())
+            
+            # Pad to 126 features (both hands) if only one hand detected
+            if len(points_combined) < 126:
+                points_combined.extend([0.0] * (126 - len(points_combined)))
+            elif len(points_combined) > 126:
+                # Truncate if somehow more than both hands
+                points_combined = points_combined[:126]
+            
+            if len(points_combined) != 126:
+                print(f"Warning: Expected 126 features (both hands), got {len(points_combined)}")
                 return "Feature size mismatch", None
             
-            # Extract features: points_flat + hit_order + chain_code
-            features = self._extract_features(flat, hit_order or [], chain_code or [])
+            # Extract features: points_flat + hit_order + chain_code + palm_angles + trigger_distance
+            features = self._extract_features(
+                np.array(points_combined, dtype=np.float32),
+                hit_order or [],
+                chain_code or [],
+                palm_angles_left or [],
+                palm_angles_right or [],
+                trigger_distance_left or [],
+                trigger_distance_right or []
+            )
 
             # Scale features if scaler available
             if self.scaler is not None:
@@ -359,15 +411,26 @@ class ASLInferenceApp:
             return "Prediction error", None
 
     def _extract_features(
-        self, points_flat: np.ndarray, hit_order: List[int], chain_code: List[int]
+        self, 
+        points_flat: np.ndarray, 
+        hit_order: List[int], 
+        chain_code: List[int],
+        palm_angles_left: List[tuple],
+        palm_angles_right: List[tuple],
+        trigger_distance_left: List[float],
+        trigger_distance_right: List[float]
     ) -> np.ndarray:
         """
-        Extract features matching training pipeline: points_flat + hit_order + chain_code.
+        Extract features matching training pipeline: points_flat + hit_order + chain_code + palm_angles + trigger_distance.
         
         Args:
-            points_flat: 63-dimensional flattened hand landmarks
+            points_flat: 126-dimensional flattened hand landmarks (both hands)
             hit_order: List of voxel indices hit during tracking
             chain_code: List of chain code direction indices
+            palm_angles_left: List of (yaw, pitch, roll) tuples for left hand
+            palm_angles_right: List of (yaw, pitch, roll) tuples for right hand
+            trigger_distance_left: List of trigger distances for left hand
+            trigger_distance_right: List of trigger distances for right hand
             
         Returns:
             Combined feature vector
@@ -378,11 +441,44 @@ class ASLInferenceApp:
         # Pad or truncate chain_code
         chain_code_padded = list(chain_code[:self.max_chain_code_len]) + [0] * (self.max_chain_code_len - len(chain_code))
         
-        # Combine features
+        # Flatten palm_angles from both hands
+        # Note: face_grid_3d returns (yaw, pitch, roll), but dataset stores [pitch, yaw, roll]
+        # Training expects [pitch, yaw, roll] format, so we need to reorder
+        palm_angles_flat = []
+        if palm_angles_left:
+            for angle_tuple in palm_angles_left:
+                if isinstance(angle_tuple, (tuple, list)) and len(angle_tuple) == 3:
+                    # Convert (yaw, pitch, roll) to [pitch, yaw, roll] to match training
+                    yaw, pitch, roll = angle_tuple
+                    palm_angles_flat.extend([pitch, yaw, roll])
+        
+        if palm_angles_right:
+            for angle_tuple in palm_angles_right:
+                if isinstance(angle_tuple, (tuple, list)) and len(angle_tuple) == 3:
+                    # Convert (yaw, pitch, roll) to [pitch, yaw, roll] to match training
+                    yaw, pitch, roll = angle_tuple
+                    palm_angles_flat.extend([pitch, yaw, roll])
+        
+        # Pad palm_angles_flat
+        palm_angles_padded = list(palm_angles_flat[:self.max_palm_angles_len]) + [0.0] * (self.max_palm_angles_len - len(palm_angles_flat))
+        
+        # Combine trigger_distance from both hands
+        trigger_distance = []
+        if trigger_distance_left:
+            trigger_distance.extend(trigger_distance_left)
+        if trigger_distance_right:
+            trigger_distance.extend(trigger_distance_right)
+        
+        # Pad trigger_distance
+        trigger_distance_padded = list(trigger_distance[:self.max_trigger_distance_len]) + [0.0] * (self.max_trigger_distance_len - len(trigger_distance))
+        
+        # Combine all features: points_flat + hit_order + chain_code + palm_angles + trigger_distance
         combined = np.concatenate([
             points_flat,
             np.array(hit_order_padded, dtype=np.float32),
-            np.array(chain_code_padded, dtype=np.float32)
+            np.array(chain_code_padded, dtype=np.float32),
+            np.array(palm_angles_padded, dtype=np.float32),
+            np.array(trigger_distance_padded, dtype=np.float32)
         ])
         
         return combined.reshape(1, -1)
@@ -460,6 +556,57 @@ class ASLInferenceApp:
         except Exception as e:
             # Don't crash on grid info errors
             print(f"Error updating grid info: {e}")
+
+    def _check_auto_reset(self, label: str, confidence: Optional[float]) -> None:
+        """
+        Check if we should auto-reset after sign detection.
+        
+        Resets grid tracking if:
+        - A valid hand sign is first detected (confidence >= CONFIDENCE_THRESHOLD)
+        - One second has elapsed since that first detection
+        """
+        current_time = time()
+        
+        # Check if we have a valid sign detection (confidence >= threshold and valid label)
+        if (confidence is not None and 
+            confidence >= CONFIDENCE_THRESHOLD and 
+            label not in ("No hand detected", "Low confidence", "Model not loaded", "Feature size mismatch", "Prediction error")):
+            
+            # First time detecting a sign - start timer
+            if self.first_detection_time is None:
+                self.first_detection_time = current_time
+                print(f"Sign detected: '{label}' with {confidence:.2f} confidence - reset timer started")
+            
+            # Check if 1 second has elapsed since first detection
+            elif self.first_detection_time is not None:
+                elapsed = current_time - self.first_detection_time
+                if elapsed >= RESET_DELAY:
+                    # Reset grid tracking to start fresh for next sign
+                    print(f"Auto-reset: 1 second elapsed after first sign detection (current: '{label}' with {confidence:.2f})")
+                    self._reset_tracking()
+                    self.first_detection_time = None
+        else:
+            # No valid sign detected or confidence dropped - reset timer
+            if self.first_detection_time is not None:
+                self.first_detection_time = None
+
+    def _reset_tracking(self) -> None:
+        """Reset grid tracking to start fresh detection."""
+        if self.capture and self.grid_tracking_active:
+            # Stop and restart grid tracking to clear all accumulated data
+            self.capture.stop_grid_tracking()
+            self.capture.start_grid_tracking()
+            
+            # Clear prediction buffer
+            if self.pred_buffer:
+                self.pred_buffer.clear()
+            
+            # Reset UI displays
+            self.hit_count_label.config(text="Hit Count: 0/160")
+            self.voxel_path_label.config(text="[]")
+            self.chain_code_label.config(text="[]")
+            
+            print("Grid tracking reset - ready for next sign detection")
 
     def _update_prediction_display(self, label: str, confidence: Optional[float]) -> None:
         """Update UI with latest prediction."""
