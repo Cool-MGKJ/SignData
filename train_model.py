@@ -613,28 +613,22 @@ def main(dataset_paths: List[str] = None) -> None:
     print(f"Test set: {X_test.shape[0]} samples")
 
     # Step 4: Train models
+    # Training only SVM RBF as requested
+    print("\nTraining SVM RBF classifier...")
     svm_model = train_svm(X_train, y_train)
-    rf_model = train_random_forest(X_train, y_train)
-    gb_model = train_gradient_boosting(X_train, y_train)
 
-    # Step 5: Evaluate models
-    svm_metrics = evaluate_model(svm_model, X_test, y_test, "SVM", label_encoder)
-    rf_metrics = evaluate_model(rf_model, X_test, y_test, "Random Forest", label_encoder)
-    gb_metrics = evaluate_model(gb_model, X_test, y_test, "Gradient Boosting", label_encoder)
+    # Step 5: Evaluate model
+    svm_metrics = evaluate_model(svm_model, X_test, y_test, "SVM RBF", label_encoder)
 
-    # Step 6: Compare models
+    # Step 6: Display results
     print("\n" + "=" * 60)
-    print("Model Comparison:")
+    print("SVM RBF Model Results:")
     print("=" * 60)
     print(f"\nSVM Accuracy:  {svm_metrics['accuracy']:.4f}")
-    print(f"RF Accuracy:   {rf_metrics['accuracy']:.4f}")
-    print(f"GB Accuracy:   {gb_metrics['accuracy']:.4f}")
-    print(f"\nSVM F1-score:  {svm_metrics['f1_score']:.4f}")
-    print(f"RF F1-score:   {rf_metrics['f1_score']:.4f}")
-    print(f"GB F1-score:   {gb_metrics['f1_score']:.4f}")
+    print(f"SVM Precision: {svm_metrics['precision']:.4f}")
+    print(f"SVM Recall:    {svm_metrics['recall']:.4f}")
+    print(f"SVM F1-score:  {svm_metrics['f1_score']:.4f}")
 
-    # User specified SVM as best model
-    print(f"\n[+] Best performing model: SVM (as specified)")
     best_model = "SVM"
 
     # Find max trigger_distance length for saving
@@ -643,8 +637,15 @@ def main(dataset_paths: List[str] = None) -> None:
         trigger_distance = feat_dict.get("trigger_distance", [])
         max_trigger_distance_len = max(max_trigger_distance_len, len(trigger_distance))
 
-    # Step 7: Save artifacts
-    save_artifacts(svm_model, rf_model, gb_model, scaler, label_encoder, max_hit_order_len, max_chain_code_len, max_palm_angles_len, max_trigger_distance_len)
+    # Step 7: Save artifacts (only SVM model, dummy RF and GB for compatibility)
+    # Create dummy models for save_artifacts compatibility
+    from sklearn.dummy import DummyClassifier
+    dummy_rf = DummyClassifier(strategy="most_frequent")
+    dummy_rf.fit(X_train, y_train)
+    dummy_gb = DummyClassifier(strategy="most_frequent")
+    dummy_gb.fit(X_train, y_train)
+    
+    save_artifacts(svm_model, dummy_rf, dummy_gb, scaler, label_encoder, max_hit_order_len, max_chain_code_len, max_palm_angles_len, max_trigger_distance_len)
 
     print("\n" + "=" * 60)
     print("Training pipeline completed successfully!")
