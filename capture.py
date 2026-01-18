@@ -519,10 +519,8 @@ class HandCapture:
                     self.mp_drawing_styles.get_default_hand_connections_style()
                 )
         
-        # Convert RGB to BGR after all drawing is done
-        annotated_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-        
         # Process face for grid (must be called every frame to update grid position)
+        # Use original BGR frame for face detection
         if draw_grid:
             self.face_grid_tracker.process_frame(frame)
         
@@ -530,7 +528,11 @@ class HandCapture:
         if track_grid_hits and landmarks_list:
             self.face_grid_tracker.update_hit_tracking(landmarks_list)
         
-        # Draw grid on top (always 3D voxel grid)
+        # Convert RGB to BGR after MediaPipe inference and drawing, immediately before OpenCV drawing operations
+        # This ensures OpenCV drawing functions (cv2.circle, cv2.line) receive BGR frames
+        annotated_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+        
+        # Draw grid on top (always 3D voxel grid) - OpenCV drawing expects BGR
         if draw_grid:
             # Get selected landmark for path visualization (default: index_tip = 8)
             selected_landmark = getattr(self, 'selected_landmark', 8)
@@ -541,6 +543,7 @@ class HandCapture:
                 show_indices=True  # Show grid point numbers
             )
         
+        # Return BGR frame for OpenCV display
         return annotated_frame, landmarks_list
     
     def get_landmarks(self, frame: np.ndarray) -> List[dict]:
