@@ -47,7 +47,7 @@ STATUS_FONT = ("Arial", 12, "bold")
 CONFIDENCE_THRESHOLD = 0.5  # Detection fires when confidence >= 0.5
 SMOOTHING_WINDOW = 8  # set to 0 to disable majority-vote smoothing
 RESET_DELAY = 1.0  # Seconds to wait after first sign detection before reset
-MODEL_PATH = Path("models/asl_svm_model.pkl")
+MODEL_PATH = Path("models/asl_rf_model.pkl")
 SCALER_PATH = Path("models/scaler.pkl")
 ENCODER_PATH = Path("models/label_encoder.pkl")
 FEATURE_CONFIG_PATH = Path("models/feature_config.pkl")

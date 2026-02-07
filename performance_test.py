@@ -40,7 +40,7 @@ LABEL_ENCODER_PATH = MODELS_DIR / "label_encoder.pkl"
 FEATURE_CONFIG_PATH = MODELS_DIR / "feature_config.pkl"
 
 DEFAULT_DATASET_PATHS = [
-    "data/augmented_data.json",
+    "data/combined_hand_sign_data ANGLE.json",
 ]
 
 TEST_SIZE = 0.2

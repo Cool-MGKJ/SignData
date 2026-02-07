@@ -48,7 +48,7 @@ LABEL_ENCODER_PATH = MODELS_DIR / "label_encoder.pkl"
 FEATURE_CONFIG_PATH = MODELS_DIR / "feature_config.pkl"
 
 DEFAULT_DATASET_PATHS = [
-    "data/asl_dataset.json",
+    "data/combined_hand_sign_data ANGLE.json",
 ]
 
 TEST_SIZE = 0.2
@@ -612,24 +612,40 @@ def main(dataset_paths: List[str] = None) -> None:
     print(f"Training set: {X_train.shape[0]} samples")
     print(f"Test set: {X_test.shape[0]} samples")
 
-    # Step 4: Train models
-    # Training only SVM RBF as requested
-    print("\nTraining SVM RBF classifier...")
+    # Step 4: Train all models
+    print("\nStep 4: Training all models...")
     svm_model = train_svm(X_train, y_train)
+    rf_model = train_random_forest(X_train, y_train)
+    gb_model = train_gradient_boosting(X_train, y_train)
 
-    # Step 5: Evaluate model
+    # Step 5: Evaluate all models
+    print("\nStep 5: Evaluating all models...")
     svm_metrics = evaluate_model(svm_model, X_test, y_test, "SVM RBF", label_encoder)
+    rf_metrics = evaluate_model(rf_model, X_test, y_test, "Random Forest", label_encoder)
+    gb_metrics = evaluate_model(gb_model, X_test, y_test, "Gradient Boosting", label_encoder)
 
-    # Step 6: Display results
+    # Step 6: Compare results and determine best model
     print("\n" + "=" * 60)
-    print("SVM RBF Model Results:")
+    print("Model Performance Comparison")
     print("=" * 60)
-    print(f"\nSVM Accuracy:  {svm_metrics['accuracy']:.4f}")
-    print(f"SVM Precision: {svm_metrics['precision']:.4f}")
-    print(f"SVM Recall:    {svm_metrics['recall']:.4f}")
-    print(f"SVM F1-score:  {svm_metrics['f1_score']:.4f}")
+    print(f"\n{'Model':<20} {'Accuracy':<10} {'Precision':<10} {'Recall':<10} {'F1-Score':<10}")
+    print("-" * 60)
+    print(f"{'SVM RBF':<20} {svm_metrics['accuracy']:<10.4f} {svm_metrics['precision']:<10.4f} "
+          f"{svm_metrics['recall']:<10.4f} {svm_metrics['f1_score']:<10.4f}")
+    print(f"{'Random Forest':<20} {rf_metrics['accuracy']:<10.4f} {rf_metrics['precision']:<10.4f} "
+          f"{rf_metrics['recall']:<10.4f} {rf_metrics['f1_score']:<10.4f}")
+    print(f"{'Gradient Boosting':<20} {gb_metrics['accuracy']:<10.4f} {gb_metrics['precision']:<10.4f} "
+          f"{gb_metrics['recall']:<10.4f} {gb_metrics['f1_score']:<10.4f}")
 
-    best_model = "SVM"
+    # Determine best model based on F1 score
+    all_metrics = [
+        ("SVM", svm_metrics['f1_score']),
+        ("Random Forest", rf_metrics['f1_score']),
+        ("Gradient Boosting", gb_metrics['f1_score'])
+    ]
+    best_model = max(all_metrics, key=lambda x: x[1])[0]
+    
+    print(f"\n🏆 Best performing model: {best_model}")
 
     # Find max trigger_distance length for saving
     max_trigger_distance_len = 0
@@ -637,15 +653,9 @@ def main(dataset_paths: List[str] = None) -> None:
         trigger_distance = feat_dict.get("trigger_distance", [])
         max_trigger_distance_len = max(max_trigger_distance_len, len(trigger_distance))
 
-    # Step 7: Save artifacts (only SVM model, dummy RF and GB for compatibility)
-    # Create dummy models for save_artifacts compatibility
-    from sklearn.dummy import DummyClassifier
-    dummy_rf = DummyClassifier(strategy="most_frequent")
-    dummy_rf.fit(X_train, y_train)
-    dummy_gb = DummyClassifier(strategy="most_frequent")
-    dummy_gb.fit(X_train, y_train)
-    
-    save_artifacts(svm_model, dummy_rf, dummy_gb, scaler, label_encoder, max_hit_order_len, max_chain_code_len, max_palm_angles_len, max_trigger_distance_len)
+    # Step 7: Save all trained models
+    print("\nStep 7: Saving all trained models...")
+    save_artifacts(svm_model, rf_model, gb_model, scaler, label_encoder, max_hit_order_len, max_chain_code_len, max_palm_angles_len, max_trigger_distance_len)
 
     print("\n" + "=" * 60)
     print("Training pipeline completed successfully!")
