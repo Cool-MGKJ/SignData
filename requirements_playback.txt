@@ -1,0 +1,16 @@
+# Requirements for ASL Avatar Playback System
+
+# Core dependencies
+numpy>=1.24.0
+
+# 3D Rendering
+PyOpenGL>=3.1.6
+PyOpenGL-accelerate>=3.1.6  # Optional but recommended for performance
+
+# Windowing
+glfw>=2.5.0  # For OpenGL window management
+
+# Note: On some systems, you may need to install system libraries:
+# - Linux: sudo apt-get install libglfw3 libgl1-mesa-glx
+# - macOS: Usually included or via Homebrew
+# - Windows: Usually included with Python packages
